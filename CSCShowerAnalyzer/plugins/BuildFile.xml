@@ -12,6 +12,10 @@
 <use name="L1Trigger/CSCTriggerPrimitives"/>
 <use name="rootgraphics"/>
 <use name="PhysicsTools/UtilAlgos"/>
+<use name="DataFormats/CSCRecHit"/>
+<use name="DataFormats/GeometrySurface"/>
+<use name="PhysicsTools/ONNXRuntime"/>
+<use name="onnxruntime"/>
 <use name="fastjet"/>
 <library file="*.cc" name="CSCShowerAnalyzerPlugins">
   <flags EDM_PLUGIN="1"/>

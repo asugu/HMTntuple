@@ -1,0 +1,5 @@
+*.root
+__pycache__/
+*.pyc
+CSCShowerAnalyzer/test/condor/
+CSCShowerAnalyzer/data/*/
