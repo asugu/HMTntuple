@@ -18,7 +18,7 @@
 # Run with e.g.
 #   cmsRun custom_config_RAW_MC_ML.py \
 #       inputFiles=root://cmseos.fnal.gov//store/group/... \
-#       statsPath=/data/dust/user/guvenlia/mds-ml/flex_atten/stats/norm_stats_SH_large.json \
+#       statsPath=$CMSSW_BASE/src/HMTntuple/CSCShowerAnalyzer/data/norm_stats_SH_event_cluster.json \
 #       globalTag=auto:phase1_2023_realistic_postBPix \
 #       maxEvents=50 outputFile=mdsnano_sig_ML.root
 
@@ -28,7 +28,7 @@ from Configuration.Eras.Era_Run3_cff import Run3
 
 options = VarParsing('analysis')
 options.register('statsPath',
-                 '/data/dust/user/guvenlia/mds-ml/flex_atten/stats/norm_stats_SH_large.json',
+                 '$CMSSW_BASE/src/HMTntuple/CSCShowerAnalyzer/data/norm_stats_SH_event_cluster.json',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  'norm_stats_SH_*.json used to train the ONNX graphs. Required in '
                  'practice: without it the normalization PSet is empty and the '

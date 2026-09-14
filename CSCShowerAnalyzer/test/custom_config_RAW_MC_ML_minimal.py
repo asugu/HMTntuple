@@ -27,7 +27,7 @@ from Configuration.Eras.Era_Run3_cff import Run3
 
 options = VarParsing('analysis')
 options.register('statsPath',
-                 '/data/dust/user/guvenlia/mds-ml/flex_atten/stats/norm_stats_SH_large.json',
+                 '$CMSSW_BASE/src/HMTntuple/CSCShowerAnalyzer/data/norm_stats_SH_event_cluster.json',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  'norm_stats_SH_*.json used to train the ONNX graphs')
 options.register('saveMLrechits', False,

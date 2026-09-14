@@ -17,7 +17,7 @@ from Configuration.Eras.Era_Run3_cff import Run3
 options = VarParsing('analysis')
 options.register('statsPath', '',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
-                 'Path to norm_stats_SH_large.json used to train the ONNX graphs')
+                 'Path to the norm_stats_SH_*.json used to train the ONNX graphs')
 options.register('saveMLrechits', False,
                  VarParsing.multiplicity.singleton, VarParsing.varType.bool,
                  'Also store the ML rechits themselves, not just the clusters')

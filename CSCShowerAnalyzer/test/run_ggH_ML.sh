@@ -55,23 +55,19 @@ echo ">> $(tr ',' '\n' <<<"$FILES" | wc -l) file(s), maxEvents=$MAXEV"
 tr ',' '\n' <<<"$FILES" | sed 's|.*/||' | sed 's/^/     /'
 
 # STATS MUST MATCH THE CHECKPOINT THE .onnx GRAPHS CAME FROM.
-# The graphs in ../data/ are currently the 24042076 (event_all SCRATCH, from
-# model_epoch_27 -- that job was killed on host RAM before writing a final), so
-# the default below is norm_stats_SH_event_all.json. Previous models are kept
-# alongside and need DIFFERENT stats:
-#   ../data/eventcluster_scratch_24040342/ -> norm_stats_SH_event_cluster.json
-#   ../data/eventall_24041799/             -> norm_stats_SH_event_all.json
-#   ../data/eventcluster_24040343/         -> norm_stats_SH_event_cluster.json
-#   ../data/aug13_baseline/                -> norm_stats_SH_large.json
-# These differ a LOT: simhits_time mean 0.987 vs -0.491, std 9.33 vs 18.96, and
-# strips.min differs too, so the wrong file corrupts BOTH the input
-# normalization and the output denormalization, silently. Override with
-#     STATS=/path/to/norm_stats_SH_large.json ./run_ggH_ML.sh
+# The graphs in ../data/ are the v13b_ft_iso 24317153 (event_cluster finetune),
+# so the stats that go with them are ../data/norm_stats_SH_event_cluster.json,
+# which is the default below and ships alongside the graphs.
+# A mismatched stats file corrupts BOTH the input normalization and the output
+# denormalization, silently -- the scales differ by more than an order of
+# magnitude between trainings (simhits_time std 18.96 here vs 62.25 for
+# event_all). Override with
+#     STATS=/path/to/norm_stats_SH_other.json ./run_ggH_ML.sh
 OUT=mdsnano_ggH_MH125_MLtwin_${NFILES}files.root
 
 cmsRun custom_config_RAW_MC_ML_minimal.py \
   inputFiles="$FILES" \
-  statsPath=${STATS:-/data/dust/user/guvenlia/mds-ml/flex_atten/stats/norm_stats_SH_event_all.json} \
+  statsPath=${STATS:-$CMSSW_BASE/src/HMTntuple/CSCShowerAnalyzer/data/norm_stats_SH_event_cluster.json} \
   saveMLrechits=1 \
   maxEvents=$MAXEV \
   outputFile=$OUT
