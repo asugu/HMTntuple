@@ -53,3 +53,9 @@ python3 crab_multi_dataset.py --work-area [crab directory] --status
 ```
 The failed job will be automatically resubmitted. If the user doesn't want auto-resubmission, please add `--no-resubmit` in the command line.
 
+
+## CSC rechit cluster associations
+
+See [CSC rechit-to-offline-cluster IDs](CSCShowerAnalyzer/docs/rechit-cluster-ids/README.md)
+for the branch contract, implementation changes, separately supplied dependency,
+100-event validation evidence and compatibility limits.

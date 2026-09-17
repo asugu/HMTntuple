@@ -290,6 +290,9 @@ def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
         process.MDSTask.add(process.cscMDSshowerTableML)
 
         if saveMLrechits:
+            # Same input collection/order as mlCSCRechitsTable; extend it with
+            # the offline association without matching rounded coordinates.
+            process.cscMDSshowerTableML.rechitTable = cms.string("cscMLRechits")
             # Kept opt-in, mirroring saveRechits: CSC rechits are ~5 kb/event
             # and ML hits are a second such collection.
             process.mlCSCRechitsTable = cscRechitsTable.clone(

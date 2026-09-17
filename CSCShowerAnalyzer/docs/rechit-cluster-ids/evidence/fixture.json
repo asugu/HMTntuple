@@ -1,0 +1,14 @@
+{
+  "source_commit": "01dd35a869b849d2dad978c4e855c318e08f0ee4",
+  "cmssw_version": "CMSSW_13_2_5",
+  "scram_arch": "el8_amd64_gcc11",
+  "input_uri": "root://cmseos.fnal.gov//store/group/lpclonglived/apresyan/privateProduction/DR/step2_FEVTSIM/Run3_Summer23/ggH_Hto2Sto4B_MH-125-MS-15-ctauS-1000/batch2/v2/ggH_Hto2Sto4B_MH-125-MS-15-ctauS-1000/crab_S23_S2_ggH_Hto2Sto4B_MH-125-MS-15-ctauS-1000_batch2_v2/250805_154619/0000/FEVTSIM_999.root",
+  "max_events": 100,
+  "configuration": "HMTntuple/CSCShowerAnalyzer/test/custom_config_RAW_MC_ML_minimal.py",
+  "validation_date": "2026-09-14",
+  "saveMLrechits": true,
+  "looseNRechitMin": 0,
+  "root_version": "6.26.11",
+  "gcc_version": "11.4.1",
+  "onnxruntime_version": "1.14.1"
+}
