@@ -85,7 +85,7 @@ dtSegmentsTable = dtSegmentsTable.clone(
 
 def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
                   MLrechits=False, saveMLrechits=False, MLstatsPath=None,
-                  looseNRechitMin=0):
+                  looseNRechitMin=0, MLmodelTag=None):
     # looseNRechitMin > 0 adds a SECOND pair of offline shower tables with the
     # cluster hit threshold lowered from the default 50. It measures the
     # efficiency CEILING: the nominal denominator is purely geometric (LLP
@@ -200,11 +200,18 @@ def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
         #
         # Needs digis, so this only works on RAW (see MDSshowerDigi above for
         # the unpacker). On AOD there are no wire/strip digis to read.
-        from HMTntuple.CSCShowerAnalyzer.mlCSCRecHits_cfi import mlCSCRecHits, read_norm_stats
+        from HMTntuple.CSCShowerAnalyzer.mlCSCRecHits_cfi import (
+            mlCSCRecHits, read_norm_stats, MODEL_DIR)
 
         process.mlCSCRecHits = mlCSCRecHits
         if MLstatsPath is not None:
             process.mlCSCRecHits.normalization = read_norm_stats(MLstatsPath)
+        # MLmodelTag selects data/mds_hits_<tag>_{encoder,decoder}.onnx
+        if MLmodelTag:
+            process.mlCSCRecHits.encoderPath = cms.string(
+                "%s/mds_hits_%s_encoder.onnx" % (MODEL_DIR, MLmodelTag))
+            process.mlCSCRecHits.decoderPath = cms.string(
+                "%s/mds_hits_%s_decoder.onnx" % (MODEL_DIR, MLmodelTag))
 
         process.ca4CSCrechitClustersML = cscRechitClusterProducer.clone(
             recHitLabel = "mlCSCRecHits"

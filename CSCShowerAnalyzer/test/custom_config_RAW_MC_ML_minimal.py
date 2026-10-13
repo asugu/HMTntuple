@@ -41,6 +41,9 @@ options.register('looseNRechitMin', 0,
                  "CEILING -- how many fiducial LLPs left enough energy to "
                  "cluster at all -- separately from the clusterer's own "
                  "efficiency. 0 disables the extra tables entirely.")
+options.register('modelTag', '',
+                 VarParsing.multiplicity.singleton, VarParsing.varType.string,
+                 "selects data/mds_hits_<tag>_{encoder,decoder}.onnx; empty = cfi default")
 options.register('globalTag', '130X_mcRun3_2023_realistic_postBPix_v6',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  'Global tag; must match the production campaign')
@@ -179,6 +182,7 @@ process = add_mdsTables(
     saveMLrechits=options.saveMLrechits,
     MLstatsPath=options.statsPath or None,
     looseNRechitMin=options.looseNRechitMin,
+    MLmodelTag=options.modelTag or None,
 )
 
 process.p.associate(process.nanoTableTaskCommon)

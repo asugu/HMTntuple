@@ -18,6 +18,7 @@ import FWCore.ParameterSet.Config as cms
 # instead of silently feeding the model transposed features.
 # ---------------------------------------------------------------------------
 
+# 6 wire/strip (x,y) columns use the layer trapezoid frame; their min/max entries are unused
 WIRE_FEATURES = [
     "cscWireDigiTimeBinsOn%d" % i for i in range(16)
 ] + [
@@ -63,14 +64,8 @@ def read_norm_stats(stats_path):
                     "%s: '%s' %s has %d entries, expected %d (feature order changed?)"
                     % (stats_path, group, key, len(entry[key]), len(expected)))
 
-    # Output side. The network emits NORMALIZED x, y, t, E, so the producer has
-    # to invert each one. Positions are minmax over simhits_pos; time is a
-    # z-score; energy is a z-score in log10 space and additionally needs the
-    # pow10. Nothing in the ONNX export does this -- the contract check
-    # compared ONNX against torch and both are normalized, so it could not have
-    # caught it.
-    for group, method in (("simhits_pos", "minmax"),
-                          ("simhits_time", "std"),
+    # output: x,y in cm; t z-scored, E z-scored in log10 (needs pow10)
+    for group, method in (("simhits_time", "std"),
                           ("simhits_energy", "std")):
         if group not in stats:
             raise RuntimeError("%s: missing '%s' group" % (stats_path, group))
@@ -80,17 +75,11 @@ def read_norm_stats(stats_path):
                 "%s: '%s' uses method '%s', the producer inverts '%s'"
                 % (stats_path, group, got, method))
 
-    pos = stats["simhits_pos"]
-    if len(pos["min"]) != 3 or len(pos["max"]) != 3:
-        raise RuntimeError("%s: simhits_pos must be 3-dimensional (x, y, z)" % stats_path)
-
     return cms.PSet(
         wireMin=cms.vdouble(*[float(v) for v in stats["wires"]["min"]]),
         wireMax=cms.vdouble(*[float(v) for v in stats["wires"]["max"]]),
         stripMin=cms.vdouble(*[float(v) for v in stats["strips"]["min"]]),
         stripMax=cms.vdouble(*[float(v) for v in stats["strips"]["max"]]),
-        posMin=cms.vdouble(*[float(v) for v in pos["min"]]),
-        posMax=cms.vdouble(*[float(v) for v in pos["max"]]),
         timeMean=cms.double(float(stats["simhits_time"]["mean"][0])),
         timeStd=cms.double(float(stats["simhits_time"]["std"][0])),
         energyMean=cms.double(float(stats["simhits_energy"]["mean"][0])),
@@ -99,19 +88,19 @@ def read_norm_stats(stats_path):
     )
 
 
-# Bucket graphs, ascending by slot count. The producer picks one per event from
-# digi occupancy; see pickBucket() in the plugin.
-BUCKET_SLOTS = [4, 16, 64, 256, 512]
-
 MODEL_DIR = "HMTntuple/CSCShowerAnalyzer/data"
 
 mlCSCRecHits = cms.EDProducer(
     "MLCSCRecHitProducer",
     wireDigiLabel=cms.InputTag("muonCSCDigis", "MuonCSCWireDigi"),
     stripDigiLabel=cms.InputTag("muonCSCDigis", "MuonCSCStripDigi"),
-    modelPaths=cms.vstring(
-        *["%s/mds_hits_cmssw_s%d.onnx" % (MODEL_DIR, n) for n in BUCKET_SLOTS]),
-    bucketSlots=cms.vint32(*BUCKET_SLOTS),
+    # encoder reports n_slots per doc; decoder runs on exactly those slots
+    encoderPath=cms.string("%s/mds_hits_v22_encoder.onnx" % MODEL_DIR),
+    decoderPath=cms.string("%s/mds_hits_v22_decoder.onnx" % MODEL_DIR),
+    # kept hits per doc: "mean" = round(count_mu), "upper" = round(mu + slotZ*sd), ~3x more
+    nKeepRule=cms.string("mean"),
+    # Must equal the run's slot_z; only used by nKeepRule="upper".
+    slotZ=cms.double(2.0),
     # Training kept a strip when max(ADC) - min(ADC) exceeded this.
     stripAdcRangeThreshold=cms.double(13.3),
     # Training built docs only from chamber-layers carrying both views.
@@ -136,8 +125,6 @@ mlCSCRecHits = cms.EDProducer(
         wireMax=cms.vdouble(),
         stripMin=cms.vdouble(),
         stripMax=cms.vdouble(),
-        posMin=cms.vdouble(),
-        posMax=cms.vdouble(),
         timeMean=cms.double(0.),
         timeStd=cms.double(1.),
         energyMean=cms.double(0.),

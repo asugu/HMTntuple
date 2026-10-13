@@ -19,10 +19,11 @@
       muonCSCDigis  ->  MLCSCRecHitProducer  ->  ca4CSCrechitClustersML
                                              ->  cscMDSClusterTableML
 
-  The network is exported as five fixed-slot "bucket" graphs (4/16/64/256/512
-  slots per doc). A "doc" is one CSC chamber-layer. Selection of how many slots
-  are real is *inside* the graph (count head's Negative-Binomial upper bound),
-  so this producer applies no threshold of its own -- it reads n_keep.
+  Two ONNX graphs (encoder, decoder). A "doc" is one CSC chamber-layer.
+  - encoder reports n_slots per doc; the decoder runs on exactly those slots
+  - six wire/strip (x,y) inputs use the layer trapezoid frame, not min-max
+  - output x,y in cm; t and E are z-scored and inverted here
+  - nKeepRule sets how many ranked slots per doc become hits
 
   See onnx/CMSSW_HANDOFF.md in the mds-ml repository for the model contract.
 */
@@ -138,6 +139,58 @@ namespace {
     return std::min(1.0, std::max(-1.0, v));
   }
 
+  // layer trapezoid frame for trap_inputs, from live geometry (matches the training LUT)
+  // project in global x-y (not toLocal), use the layer's own DetId; parameters() are HALF widths
+  struct TrapFrame {
+    double cx = 0., cy = 0.;   // layer centre, global
+    double ax = 1., ay = 0.;   // width axis = height axis rotated by -90 deg
+    double w0 = 1., dwdv = 0.; // half-width at v=0, and its slope along v
+    double hv = 1.;            // half-length along the height axis
+  };
+
+  inline TrapFrame trapFrameFor(const CSCLayer* layer) {
+    TrapFrame t;
+    const GlobalPoint c = layer->toGlobal(LocalPoint(0., 0., 0.));
+    t.cx = c.x();
+    t.cy = c.y();
+
+    const GlobalVector yh = layer->toGlobal(LocalVector(0., 1., 0.));
+    const double nrm = std::hypot(yh.x(), yh.y());
+    const double cos_t = (nrm > 0. ? yh.x() / nrm : 1.);
+    const double sin_t = (nrm > 0. ? yh.y() / nrm : 0.);
+    t.ax = sin_t;
+    t.ay = -cos_t;
+
+    // TrapezoidalPlaneBounds parameters: (halfWidthNarrow, halfWidthWide,
+    // halfThickness, halfLength).
+    const auto par = layer->geometry()->parameters();
+    t.hv = par[3];
+    t.w0 = 0.5 * (par[0] + par[1]);
+    t.dwdv = (t.hv > 0. ? (par[1] - par[0]) / (2.0 * t.hv) : 0.);
+    if (t.hv <= 0.)
+      t.hv = 1.;
+    return t;
+  }
+
+  // Global (x,y) in cm -> layer-frame (u_n, v_n), in place.
+  inline void applyTrapXY(const TrapFrame& t, double& x, double& y) {
+    const double dx = x - t.cx, dy = y - t.cy;
+    const double u = t.ax * dx + t.ay * dy;
+    const double v = -t.ay * dx + t.ax * dy;
+    x = u / std::max(t.w0 + t.dwdv * v, 1e-3);
+    y = v / t.hv;
+  }
+
+  // columns carrying (u,v); these skip min-max
+  inline bool isWireTrapCol(int f) {
+    return f == kWStartX || f == kWStartX + 1 || f == kWEndX || f == kWEndX + 1 ||
+           f == kWCenterX || f == kWCenterX + 1;
+  }
+  inline bool isStripTrapCol(int f) {
+    return f == kSStartX || f == kSStartX + 1 || f == kSEndX || f == kSEndX + 1 ||
+           f == kSLayerX || f == kSLayerX + 1;
+  }
+
   // --- output denormalization ------------------------------------------------
   //
   // The network was trained on normalized targets and therefore *emits*
@@ -146,12 +199,7 @@ namespace {
   // the inversion is the producer's job. Feeding the raw graph output straight
   // into GlobalPoint puts every hit within ~1 cm of the beamline.
   //
-  // Positions use minmax over the simhit position range, so the inverse is the
-  // inverse of normalizeMinMax:
-  //     x = ((x_norm + 1) / 2) * (max - min) + min
-  inline double denormalizeMinMax(double v, double mn, double mx) {
-    return ((v + 1.0) / 2.0) * (mx - mn) + mn;
-  }
+  // x,y come out in cm (graph inverts the trapezoid); only t and E are inverted
 
   // Time uses a z-score (stats method "std"), so the inverse is affine.
   inline double denormalizeStd(double z, double mean, double sd) { return z * sd + mean; }
@@ -240,9 +288,7 @@ public:
 private:
   void produce(edm::Event&, const edm::EventSetup&) override;
 
-  // Reports the truncation counters below. Without this they are accumulated
-  // and never seen, which would make bucket under-picking exactly the silent
-  // failure pickBucket() claims it is not.
+  // reports the slot counters below
   void endStream() override;
 
   // Builds the per-hit feature rows from digis + geometry.
@@ -256,15 +302,14 @@ private:
                       std::vector<std::array<double, kNStripFeat>>& rows,
                       std::vector<uint32_t>& rawIds) const;
 
-  // Chooses which bucket graph to run for a given doc count / occupancy.
-  size_t pickBucket(size_t nWires, size_t nStrips) const;
-
   const edm::EDGetTokenT<CSCWireDigiCollection> wireDigiToken_;
   const edm::EDGetTokenT<CSCStripDigiCollection> stripDigiToken_;
   const edm::ESGetToken<CSCGeometry, MuonGeometryRecord> geometryToken_;
 
-  const std::vector<std::string> modelPaths_;
-  const std::vector<int> bucketSlots_;
+  const std::string encoderPath_;
+  const std::string decoderPath_;
+  const std::string nKeepRule_;
+  const double slotZ_;
   const double stripAdcRangeThreshold_;
   const bool requireStripWirePair_;
   const unsigned int minFiredStrips_;
@@ -274,17 +319,14 @@ private:
   std::array<double, kNWireFeat> wireMin_, wireMax_;
   std::array<double, kNStripFeat> stripMin_, stripMax_;
 
-  // Output denormalization constants (simhits_pos / _time / _energy).
-  // posMin_/posMax_ are (x, y, z); only x and y are used, since the graph does
-  // not emit z -- that comes from CSCGeometry.
-  std::array<double, 3> posMin_, posMax_;
+  // Output denormalization constants (simhits_time / _energy only). x and y
+  // arrive in centimetres and z comes from CSCGeometry, so neither needs one.
   double timeMean_ = 0., timeStd_ = 1.;
   double energyMean_ = 0., energyStd_ = 1., energyLogEps_ = 1e-12;
 
-  // One ORT session per bucket. Sessions are per-stream because ORT Run() is
-  // thread-safe but we keep the IO buffers as locals anyway.
   Ort::Env env_;
-  std::vector<std::unique_ptr<Ort::Session>> sessions_;
+  std::unique_ptr<Ort::Session> encSession_;
+  std::unique_ptr<Ort::Session> decSession_;
 
   // Counters, reported by endStream(). Not mutable: produce() is non-const,
   // and each stream owns its own producer instance, so these need no locking.
@@ -292,11 +334,9 @@ private:
   unsigned long long nDocsSeen_ = 0;
   unsigned long long nDocsTruncated_ = 0;
   unsigned long long nHitsMade_ = 0;
-  // How often each bucket graph was chosen. This is the number that says
-  // whether the bucket ladder is sized right for production: the event-level
-  // max means one busy chamber-layer drags the whole event up, so a ladder
-  // that looks fine per-doc can still run every event on the widest graph.
-  std::vector<unsigned long long> nEventsPerBucket_;
+  // decoded slots vs the old dense layout
+  unsigned long long sumSlots_ = 0;
+  unsigned long long sumDenseSlots_ = 0;
 };
 
 // -----------------------------------------------------------------------------
@@ -305,25 +345,22 @@ MLCSCRecHitProducer::MLCSCRecHitProducer(const edm::ParameterSet& iConfig)
     : wireDigiToken_(consumes<CSCWireDigiCollection>(iConfig.getParameter<edm::InputTag>("wireDigiLabel"))),
       stripDigiToken_(consumes<CSCStripDigiCollection>(iConfig.getParameter<edm::InputTag>("stripDigiLabel"))),
       geometryToken_(esConsumes<CSCGeometry, MuonGeometryRecord>()),
-      modelPaths_(iConfig.getParameter<std::vector<std::string>>("modelPaths")),
-      bucketSlots_(iConfig.getParameter<std::vector<int>>("bucketSlots")),
+      encoderPath_(iConfig.getParameter<std::string>("encoderPath")),
+      decoderPath_(iConfig.getParameter<std::string>("decoderPath")),
+      nKeepRule_(iConfig.getParameter<std::string>("nKeepRule")),
+      slotZ_(iConfig.getParameter<double>("slotZ")),
       stripAdcRangeThreshold_(iConfig.getParameter<double>("stripAdcRangeThreshold")),
       requireStripWirePair_(iConfig.getParameter<bool>("requireStripWirePair")),
       minFiredStrips_(iConfig.getParameter<unsigned int>("minFiredStrips")),
       verbose_(iConfig.getUntrackedParameter<bool>("verbose", false)),
       env_(ORT_LOGGING_LEVEL_WARNING, "MLCSCRecHitProducer") {
-  if (modelPaths_.size() != bucketSlots_.size()) {
+  if (encoderPath_.empty() || decoderPath_.empty()) {
+    throw cms::Exception("Configuration") << "encoderPath and decoderPath are required";
+  }
+  if (nKeepRule_ != "mean" && nKeepRule_ != "upper") {
     throw cms::Exception("Configuration")
-        << "modelPaths (" << modelPaths_.size() << ") and bucketSlots (" << bucketSlots_.size() << ") must be parallel";
-  }
-  if (modelPaths_.empty()) {
-    throw cms::Exception("Configuration") << "at least one bucket graph is required";
-  }
-  // Buckets must be ascending so pickBucket() can take the first that fits.
-  for (size_t i = 1; i < bucketSlots_.size(); ++i) {
-    if (bucketSlots_[i] <= bucketSlots_[i - 1]) {
-      throw cms::Exception("Configuration") << "bucketSlots must be strictly ascending";
-    }
+        << "nKeepRule must be 'mean' (round(mu), matches the offline decode) or "
+           "'upper' (round(mu + slotZ*sd), the budget); got '" << nKeepRule_ << "'";
   }
 
   // --- normalization stats -------------------------------------------------
@@ -349,16 +386,8 @@ MLCSCRecHitProducer::MLCSCRecHitProducer(const edm::ParameterSet& iConfig)
   std::copy(sMin.begin(), sMin.end(), stripMin_.begin());
   std::copy(sMax.begin(), sMax.end(), stripMax_.begin());
 
-  // Output denormalization: the graph emits normalized x, y, t, E.
-  const auto posMin = normPSet.getParameter<std::vector<double>>("posMin");
-  const auto posMax = normPSet.getParameter<std::vector<double>>("posMax");
-  if (posMin.size() != 3 || posMax.size() != 3) {
-    throw cms::Exception("Configuration")
-        << "posMin/posMax must have 3 entries (x, y, z), got " << posMin.size() << "/" << posMax.size();
-  }
-  std::copy(posMin.begin(), posMin.end(), posMin_.begin());
-  std::copy(posMax.begin(), posMax.end(), posMax_.begin());
-
+  // Output: the graph emits x, y in CENTIMETRES and t, E z-scored. There is no
+  // posMin/posMax any more -- see the note beside denormalizeStd.
   timeMean_ = normPSet.getParameter<double>("timeMean");
   timeStd_ = normPSet.getParameter<double>("timeStd");
   energyMean_ = normPSet.getParameter<double>("energyMean");
@@ -370,12 +399,10 @@ MLCSCRecHitProducer::MLCSCRecHitProducer(const edm::ParameterSet& iConfig)
   opts.SetIntraOpNumThreads(1);  // CMSSW owns the threading model
   opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-  for (const auto& p : modelPaths_) {
-    const edm::FileInPath fip(p);
-    sessions_.emplace_back(std::make_unique<Ort::Session>(env_, fip.fullPath().c_str(), opts));
-  }
-
-  nEventsPerBucket_.assign(bucketSlots_.size(), 0);
+  encSession_ = std::make_unique<Ort::Session>(
+      env_, edm::FileInPath(encoderPath_).fullPath().c_str(), opts);
+  decSession_ = std::make_unique<Ort::Session>(
+      env_, edm::FileInPath(decoderPath_).fullPath().c_str(), opts);
 
   produces<CSCRecHit2DCollection>();
 }
@@ -384,19 +411,14 @@ void MLCSCRecHitProducer::endStream() {
   if (nDocsSeen_ == 0)
     return;
 
-  std::ostringstream buckets;
-  for (size_t b = 0; b < bucketSlots_.size(); ++b) {
-    const double frac = nEvents_ ? 100.0 * nEventsPerBucket_[b] / nEvents_ : 0.;
-    buckets << " s" << bucketSlots_[b] << "=" << nEventsPerBucket_[b] << " (" << std::fixed << std::setprecision(1)
-            << frac << "%)";
-  }
-
-  const double truncFrac = 100.0 * nDocsTruncated_ / nDocsSeen_;
+  const double meanSlots = nEvents_ ? double(sumSlots_) / nEvents_ : 0.;
+  const double gain = sumSlots_ ? double(sumDenseSlots_) / double(sumSlots_) : 0.;
 
   edm::LogInfo("MLCSCRecHitProducer")
-      << "events=" << nEvents_ << " docs=" << nDocsSeen_ << " hits=" << nHitsMade_ << " truncated docs="
-      << nDocsTruncated_ << " (" << std::fixed << std::setprecision(2) << truncFrac << "%)"
-      << "\n  bucket chosen per event:" << buckets.str();
+      << "events=" << nEvents_ << " docs=" << nDocsSeen_ << " hits=" << nHitsMade_
+      << "\n  packed slots/event=" << std::fixed << std::setprecision(1) << meanSlots
+      << "  (" << std::setprecision(1) << gain << "x fewer than the dense layout)"
+      << "  nKeepRule=" << nKeepRule_;
 
   // A doc whose n_keep saturated the bucket lost real hits: the count head
   // asked for more slots than the graph provides. Rare truncation is the
@@ -404,12 +426,7 @@ void MLCSCRecHitProducer::endStream() {
   // fraction means the bucket ladder is under-sized for this input and the
   // hit multiplicity is being clipped -- which would look like a physics
   // result rather than a configuration problem, hence the warning.
-  if (truncFrac > 1.0) {
-    edm::LogWarning("MLCSCRecHitProducer")
-        << "n_keep saturated the bucket in " << std::fixed << std::setprecision(2) << truncFrac
-        << "% of docs; hits were clipped. Widen bucketSlots or check that the "
-           "count head is in-distribution for this input.";
-  }
+  // no truncation: the budget is already clamped to num_queries in the encoder
 }
 
 void MLCSCRecHitProducer::fillDescriptions(edm::ConfigurationDescriptions& descriptions) {
@@ -418,8 +435,15 @@ void MLCSCRecHitProducer::fillDescriptions(edm::ConfigurationDescriptions& descr
       ->setComment("unpacked CSC wire digis");
   desc.add<edm::InputTag>("stripDigiLabel", edm::InputTag("muonCSCDigis", "MuonCSCStripDigi"))
       ->setComment("unpacked CSC strip digis");
-  desc.add<std::vector<std::string>>("modelPaths", {})->setComment("FileInPath to each bucket ONNX graph, ascending");
-  desc.add<std::vector<int>>("bucketSlots", {4, 16, 64, 256, 512})->setComment("slots per doc of each graph");
+  desc.add<std::string>("encoderPath", "")->setComment("FileInPath to <stem>_encoder.onnx");
+  desc.add<std::string>("decoderPath", "")->setComment("FileInPath to <stem>_decoder.onnx");
+  desc.add<std::string>("nKeepRule", "mean")
+      ->setComment(
+          "'mean' = round(count_mu), matching the offline decode; "
+          "'upper' = round(mu + slotZ*sd), the slot budget, ~3x larger and "
+          "what the pre-v22 graphs emitted");
+  desc.add<double>("slotZ", 2.0)
+      ->setComment("NB sigmas for the 'upper' nKeepRule; must match the run's slot_z");
   desc.add<double>("stripAdcRangeThreshold", kStripAdcRangeThreshold)
       ->setComment("keep strip if max(ADC)-min(ADC) exceeds this (training used 13.3)");
   desc.add<bool>("requireStripWirePair", true)
@@ -437,9 +461,7 @@ void MLCSCRecHitProducer::fillDescriptions(edm::ConfigurationDescriptions& descr
   norm.add<std::vector<double>>("wireMax", {});
   norm.add<std::vector<double>>("stripMin", {});
   norm.add<std::vector<double>>("stripMax", {});
-  // Output side: the graph emits normalized x, y, t, E.
-  norm.add<std::vector<double>>("posMin", {});
-  norm.add<std::vector<double>>("posMax", {});
+  // Output side: x and y arrive in CENTIMETRES, so only t and E have inverses.
   norm.add<double>("timeMean", 0.);
   norm.add<double>("timeStd", 1.);
   norm.add<double>("energyMean", 0.);
@@ -480,6 +502,8 @@ void MLCSCRecHitProducer::buildWireRows(const CSCWireDigiCollection& wireDigis,
     const float htopedge = bounds->width() / 2.0f;
     const float hbotedge = bounds->widthAtHalfLength() - htopedge;
     const GlobalPoint chamberCenter = layer->toGlobal(LocalPoint(0., 0., 0.));
+    // Per layer, not per digi: it is pure geometry.
+    const TrapFrame tf = trapFrameFor(layer);
 
     const auto& range = (*detIt).second;
     for (auto digi = range.first; digi != range.second; ++digi) {
@@ -527,6 +551,11 @@ void MLCSCRecHitProducer::buildWireRows(const CSCWireDigiCollection& wireDigis,
       row[kWWireGroup] = wireGroup;
       row[kWDetId] = static_cast<double>(id.rawId());
 
+      // trap frame on raw cm, before min-max (clipping would hit the chamber edge)
+      applyTrapXY(tf, row[kWStartX + 0], row[kWStartX + 1]);
+      applyTrapXY(tf, row[kWEndX + 0], row[kWEndX + 1]);
+      applyTrapXY(tf, row[kWCenterX + 0], row[kWCenterX + 1]);
+
       rows.push_back(row);
       // Grouping key, not the true id: see docKeyRawId. Wires are already
       // ring 1 in ME1/1, so this is a no-op for them -- applied anyway so
@@ -550,6 +579,7 @@ void MLCSCRecHitProducer::buildStripRows(const CSCStripDigiCollection& stripDigi
     if (!bounds)
       continue;
     const float halfLength = 0.5f * bounds->length();
+    const TrapFrame tf = trapFrameFor(layer);
 
     const auto& range = (*detIt).second;
     for (auto digi = range.first; digi != range.second; ++digi) {
@@ -595,6 +625,11 @@ void MLCSCRecHitProducer::buildStripRows(const CSCStripDigiCollection& stripDigi
       row[kSStripNumber] = stripNum;
       row[kSDetId] = static_cast<double>(id.rawId());
 
+      // trap_inputs, strip side -- see the note in buildWireRows.
+      applyTrapXY(tf, row[kSStartX + 0], row[kSStartX + 1]);
+      applyTrapXY(tf, row[kSEndX + 0], row[kSEndX + 1]);
+      applyTrapXY(tf, row[kSLayerX + 0], row[kSLayerX + 1]);
+
       rows.push_back(row);
       // ME1/a strips (ring 4) fold onto ring 1 here so they share a doc with
       // the ME1/1 wires of the same physical layer; without this they have no
@@ -604,21 +639,6 @@ void MLCSCRecHitProducer::buildStripRows(const CSCStripDigiCollection& stripDigi
   }
 }
 
-size_t MLCSCRecHitProducer::pickBucket(size_t nWires, size_t nStrips) const {
-  // The count head decides how many hits a doc gets, but we must choose the
-  // graph *before* running it. Digi occupancy is the only cheap proxy
-  // available: use the larger of the two per-doc digi counts as a lower bound
-  // on the hit multiplicity and take the smallest bucket that covers it.
-  //
-  // Under-picking is visible (n_keep saturates at the bucket size and the
-  // truncation counter fires), so this is a tunable, not a silent failure.
-  const size_t occupancy = std::max(nWires, nStrips);
-  for (size_t b = 0; b < bucketSlots_.size(); ++b) {
-    if (occupancy <= static_cast<size_t>(bucketSlots_[b]))
-      return b;
-  }
-  return bucketSlots_.size() - 1;
-}
 
 // -----------------------------------------------------------------------------
 
@@ -707,7 +727,9 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
     if (it == docIndex.end())
       continue;
     for (int f = 0; f < kNWireFeat; ++f)
-      wireFeat.push_back(static_cast<float>(normalizeMinMax(wireRows[i][f], wireMin_[f], wireMax_[f])));
+      wireFeat.push_back(static_cast<float>(
+          isWireTrapCol(f) ? wireRows[i][f]
+                           : normalizeMinMax(wireRows[i][f], wireMin_[f], wireMax_[f])));
     docIdxWires.push_back(static_cast<int64_t>(it->second));
     detIdxWires.push_back(static_cast<int64_t>(wireIds[i]));  // cluster index 0 -> no kBig offset
     perDocWires[it->second]++;
@@ -719,7 +741,9 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
     if (it == docIndex.end())
       continue;
     for (int f = 0; f < kNStripFeat; ++f)
-      stripFeat.push_back(static_cast<float>(normalizeMinMax(stripRows[i][f], stripMin_[f], stripMax_[f])));
+      stripFeat.push_back(static_cast<float>(
+          isStripTrapCol(f) ? stripRows[i][f]
+                            : normalizeMinMax(stripRows[i][f], stripMin_[f], stripMax_[f])));
     docIdxStrips.push_back(static_cast<int64_t>(it->second));
     detIdxStrips.push_back(static_cast<int64_t>(stripIds[i]));
     perDocStrips[it->second]++;
@@ -737,43 +761,7 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
     docRawId[kv.second] = kv.first;
   }
 
-  // One graph runs the whole event, so the bucket must cover the busiest doc.
-  //
-  // This is the event-level MAX, which is conservative and it is the dominant
-  // cost of this producer: decoder cost is linear in the slot count, so a
-  // single busy chamber-layer pushes all of the event's docs onto the widest
-  // graph. Measured slot demand is heavily skewed (p50=5, p90=33), so most
-  // docs run a vastly oversized attention.
-  //
-  // WHY NOT PER-DOC BUCKETING (the obvious fix -- do not "just" implement it):
-  // it would mean partitioning the event's docs into groups and running each
-  // group as its own call. Slot outputs ARE independent of the slot count
-  // (decoder slots attend only to wires, never to each other -- see
-  // onnx/BUCKETING_HANDOFF.md), so splitting SLOTS is safe. But splitting
-  // DOCS is not, because two things in the model couple docs to each other:
-  //
-  //   1. the encoder mask is "adjacent" (|q_det - k_det| <= 1 on the raw
-  //      DetId), so a wire attends to wires in NEIGHBOURING layers. Grouping
-  //      docs by bucket scatters neighbouring layers into different calls and
-  //      silently drops those cross-layer edges.
-  //   2. the count head's cluster-level features (sum_w_doc, sum_s_doc,
-  //      n_layers_doc; cross_attention_flex.py:889) aggregate over every doc
-  //      in the call. Per-group calls turn them into per-group totals, which
-  //      changes n_keep -- i.e. changes the hit multiplicity that is already
-  //      the open issue with this model.
-  //
-  // Neither shows up as an error; both change the answers. The natural place
-  // to fix this is the count-head retrain that is already planned for the
-  // multiplicity problem: cardinality features computed over a LOCAL
-  // neighbourhood rather than the whole call would make doc groups genuinely
-  // separable, at which point per-doc bucketing becomes safe and cheap.
-  size_t bucket = 0;
-  for (size_t d = 0; d < nDocs; ++d)
-    bucket = std::max(bucket, pickBucket(perDocWires[d], perDocStrips[d]));
-  const int nSlots = bucketSlots_[bucket];
-  nEventsPerBucket_[bucket]++;
-
-  // --- run -----------------------------------------------------------------
+  // --- graph A: encoder + count head ---------------------------------------
   auto memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
   const int64_t nW = static_cast<int64_t>(docIdxWires.size());
@@ -786,29 +774,114 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
   const std::array<int64_t, 1> shapeIdxS{{nS}};
   const std::array<int64_t, 1> shapeD{{nD}};
 
-  std::vector<Ort::Value> inputs;
-  inputs.push_back(Ort::Value::CreateTensor<float>(memInfo, wireFeat.data(), wireFeat.size(), shapeW.data(), 2));
-  inputs.push_back(Ort::Value::CreateTensor<float>(memInfo, stripFeat.data(), stripFeat.size(), shapeS.data(), 2));
-  inputs.push_back(
+  static const char* kEncIn[] = {"wires",         "strips",         "doc_idx_wires", "doc_idx_strips",
+                                 "det_idx_wires", "det_idx_strips", "det_idx_docs"};
+  static const char* kEncOut[] = {"wires_out", "doc_cond", "count_mu", "n_slots"};
+
+  std::vector<Ort::Value> encIn;
+  encIn.push_back(Ort::Value::CreateTensor<float>(memInfo, wireFeat.data(), wireFeat.size(), shapeW.data(), 2));
+  encIn.push_back(Ort::Value::CreateTensor<float>(memInfo, stripFeat.data(), stripFeat.size(), shapeS.data(), 2));
+  encIn.push_back(
       Ort::Value::CreateTensor<int64_t>(memInfo, docIdxWires.data(), docIdxWires.size(), shapeIdxW.data(), 1));
-  inputs.push_back(
+  encIn.push_back(
       Ort::Value::CreateTensor<int64_t>(memInfo, docIdxStrips.data(), docIdxStrips.size(), shapeIdxS.data(), 1));
-  inputs.push_back(
+  encIn.push_back(
       Ort::Value::CreateTensor<int64_t>(memInfo, detIdxWires.data(), detIdxWires.size(), shapeIdxW.data(), 1));
-  inputs.push_back(
+  encIn.push_back(
       Ort::Value::CreateTensor<int64_t>(memInfo, detIdxStrips.data(), detIdxStrips.size(), shapeIdxS.data(), 1));
-  inputs.push_back(Ort::Value::CreateTensor<int64_t>(memInfo, detIdxDocs.data(), detIdxDocs.size(), shapeD.data(), 1));
+  encIn.push_back(Ort::Value::CreateTensor<int64_t>(memInfo, detIdxDocs.data(), detIdxDocs.size(), shapeD.data(), 1));
 
-  static const char* kInputNames[] = {
-      "wires", "strips", "doc_idx_wires", "doc_idx_strips", "det_idx_wires", "det_idx_strips", "det_idx_docs"};
-  static const char* kOutputNames[] = {"hits", "hit_detid", "n_keep", "count_mu"};
+  auto encOut = encSession_->Run(Ort::RunOptions{nullptr}, kEncIn, encIn.data(), encIn.size(), kEncOut, 4);
 
-  auto outputs = sessions_[bucket]->Run(
-      Ort::RunOptions{nullptr}, kInputNames, inputs.data(), inputs.size(), kOutputNames, 4);
+  const float* countMu = encOut[2].GetTensorData<float>();   // (nDocs,)
+  const int32_t* nSlots = encOut[3].GetTensorData<int32_t>();  // (nDocs,)
 
-  const float* hits = outputs[0].GetTensorData<float>();          // (nDocs, nSlots, 4) x,y,t,E
-  const int64_t* hitDetId = outputs[1].GetTensorData<int64_t>();  // (nDocs, nSlots)
-  const int32_t* nKeep = outputs[2].GetTensorData<int32_t>();     // (nDocs,)
+  // --- pack the slots ------------------------------------------------------
+  // as in training: `within` restarts at 0 per doc (indexes hit_slot_embed)
+  std::vector<int64_t> docOfSlot, within, hitDetIdx;
+  std::vector<size_t> docStart(nDocs, 0);
+  size_t totalSlots = 0;
+  for (size_t d = 0; d < nDocs; ++d) {
+    docStart[d] = totalSlots;
+    totalSlots += static_cast<size_t>(std::max(0, nSlots[d]));
+  }
+  docOfSlot.reserve(totalSlots);
+  within.reserve(totalSlots);
+  hitDetIdx.reserve(totalSlots);
+  for (size_t d = 0; d < nDocs; ++d) {
+    const int ns = std::max(0, nSlots[d]);
+    for (int j = 0; j < ns; ++j) {
+      docOfSlot.push_back(static_cast<int64_t>(d));
+      within.push_back(static_cast<int64_t>(j));
+      hitDetIdx.push_back(detIdxDocs[d]);
+    }
+  }
+  if (totalSlots == 0) {
+    iEvent.put(std::move(out));
+    return;
+  }
+  sumSlots_ += totalSlots;
+  {
+    int widest = 0;
+    for (size_t d = 0; d < nDocs; ++d)
+      widest = std::max(widest, nSlots[d]);
+    sumDenseSlots_ += static_cast<unsigned long long>(nDocs) * static_cast<unsigned long long>(widest);
+  }
+
+  // --- graph B: decoder ----------------------------------------------------
+  const int64_t nSlot = static_cast<int64_t>(totalSlots);
+  const std::array<int64_t, 1> shapeSlot{{nSlot}};
+
+  static const char* kDecIn[] = {"wires_out", "doc_cond", "det_idx_wires",
+                                 "doc_of_slot", "within", "hit_det_idx"};
+  static const char* kDecOut[] = {"hits", "exist_logit"};
+
+  std::vector<Ort::Value> decIn;
+  // encOut[0] and encOut[1] are passed straight through: ORT owns those
+  // buffers and they outlive this Run, so no copy is needed.
+  decIn.push_back(std::move(encOut[0]));
+  decIn.push_back(std::move(encOut[1]));
+  decIn.push_back(
+      Ort::Value::CreateTensor<int64_t>(memInfo, detIdxWires.data(), detIdxWires.size(), shapeIdxW.data(), 1));
+  decIn.push_back(
+      Ort::Value::CreateTensor<int64_t>(memInfo, docOfSlot.data(), docOfSlot.size(), shapeSlot.data(), 1));
+  decIn.push_back(Ort::Value::CreateTensor<int64_t>(memInfo, within.data(), within.size(), shapeSlot.data(), 1));
+  decIn.push_back(
+      Ort::Value::CreateTensor<int64_t>(memInfo, hitDetIdx.data(), hitDetIdx.size(), shapeSlot.data(), 1));
+
+  auto decOut = decSession_->Run(Ort::RunOptions{nullptr}, kDecIn, decIn.data(), decIn.size(), kDecOut, 2);
+
+  const float* hits = decOut[0].GetTensorData<float>();        // (S, 4) x,y,t,E
+  const float* existLogit = decOut[1].GetTensorData<float>();  // (S,)
+
+  // --- how many hits per doc, and which -----------------------------------
+  // decoder emits every slot; nKeepRule picks K per doc ('mean' vs 'upper' differ ~3x)
+  std::vector<int> nKeepVec(nDocs, 0);
+  for (size_t d = 0; d < nDocs; ++d) {
+    const double mu = countMu[d];
+    double k = mu;
+    if (nKeepRule_ == "upper") {
+      // The budget the decoder ran at. alpha is not emitted, so recover the
+      // spread from n_slots, which IS ceil(mu + slotZ*sd): sd = (H - mu)/z.
+      const double sd = (static_cast<double>(nSlots[d]) - mu) / std::max(slotZ_, 1e-6);
+      k = mu + slotZ_ * std::max(sd, 0.);
+    }
+    const int kk = static_cast<int>(std::lround(k));
+    nKeepVec[d] = std::max(0, std::min(kk, nSlots[d]));
+  }
+
+  // Rank each doc's slots by exist logit, highest first.
+  std::vector<int> order(totalSlots);
+  for (size_t i = 0; i < totalSlots; ++i)
+    order[i] = static_cast<int>(i);
+  for (size_t d = 0; d < nDocs; ++d) {
+    const size_t lo = docStart[d];
+    const size_t hi = lo + static_cast<size_t>(std::max(0, nSlots[d]));
+    if (hi <= lo)
+      continue;
+    std::stable_sort(order.begin() + lo, order.begin() + hi,
+                     [&](int a, int b) { return existLogit[a] > existLogit[b]; });
+  }
 
   // --- convert to CSCRecHit2D ----------------------------------------------
   // Local positions are stored in the LAYER frame -- the CSC convention, and
@@ -819,25 +892,22 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
   made.reserve(nDocs * 4);
 
   for (size_t d = 0; d < nDocs; ++d) {
-    const int keep = std::min(nKeep[d], nSlots);
+    const int keep = nKeepVec[d];
     nDocsSeen_++;
-    if (keep >= nSlots)
-      nDocsTruncated_++;
 
-    for (int s = 0; s < keep; ++s) {
-      const size_t base = (d * static_cast<size_t>(nSlots) + static_cast<size_t>(s)) * 4;
+    for (int r = 0; r < keep; ++r) {
+      const size_t slot = static_cast<size_t>(order[docStart[d] + static_cast<size_t>(r)]);
+      const size_t base = slot * 4;
 
-      // The graph emits NORMALIZED x, y, t, E -- invert each with the same
-      // stats the training used, otherwise every hit lands within ~1 cm of the
-      // beamline and the "energy" comes out negative.
-      const double gx = denormalizeMinMax(hits[base + 0], posMin_[0], posMax_[0]);
-      const double gy = denormalizeMinMax(hits[base + 1], posMin_[1], posMax_[1]);
+      // x,y already global cm; only t and E need inverses
+      const double gx = hits[base + 0];
+      const double gy = hits[base + 1];
       const double tt = denormalizeStd(hits[base + 2], timeMean_, timeStd_);
       const double ee = denormalizeLogEnergy(hits[base + 3], energyMean_, energyStd_, energyLogEps_);
 
       // The graph emits the layer rawId per slot; docRawId is the fallback for
       // the (not expected) case where the slot carries no id of its own.
-      const int64_t rawSlot = hitDetId[d * static_cast<size_t>(nSlots) + static_cast<size_t>(s)] % kBig;
+      const int64_t rawSlot = hitDetIdx[slot] % kBig;
       const uint32_t rawId = rawSlot > 0 ? static_cast<uint32_t>(rawSlot) : docRawId[d];
 
       const CSCDetId layerId(rawId);
@@ -934,7 +1004,8 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
 
   if (verbose_) {
     edm::LogInfo("MLCSCRecHitProducer")
-        << "docs=" << nDocs << " bucket=" << nSlots << " wires=" << nW << " strips=" << nS << " hits=" << made.size();
+        << "docs=" << nDocs << " packedSlots=" << totalSlots << " wires=" << nW
+        << " strips=" << nS << " hits=" << made.size();
   }
 
   iEvent.put(std::move(out));
