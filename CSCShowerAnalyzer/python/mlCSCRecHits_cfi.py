@@ -95,8 +95,8 @@ mlCSCRecHits = cms.EDProducer(
     wireDigiLabel=cms.InputTag("muonCSCDigis", "MuonCSCWireDigi"),
     stripDigiLabel=cms.InputTag("muonCSCDigis", "MuonCSCStripDigi"),
     # encoder reports n_slots per doc; decoder runs on exactly those slots
-    encoderPath=cms.string("%s/mds_hits_v22_encoder.onnx" % MODEL_DIR),
-    decoderPath=cms.string("%s/mds_hits_v22_decoder.onnx" % MODEL_DIR),
+    encoderPath=cms.string("%s/mds_hits_v25abc_encoder.onnx" % MODEL_DIR),
+    decoderPath=cms.string("%s/mds_hits_v25abc_decoder.onnx" % MODEL_DIR),
     # kept hits per doc: "mean" = round(count_mu), "upper" = round(mu + slotZ*sd), ~3x more
     nKeepRule=cms.string("mean"),
     # Must equal the run's slot_z; only used by nKeepRule="upper".
@@ -119,6 +119,10 @@ mlCSCRecHits = cms.EDProducer(
     # Must equal event_datamaker.py's MIN_FIRED_STRIPS (flex_atten/
     # make_event_cluster.py). 2 since the Sep-2026 rebuild.
     minFiredStrips=cms.uint32(2),
+    # per-doc floor on kept hits: K = max(minKeep, round(mu)); 0 = plain round(mu)
+    minKeep=cms.int32(0),
+    minKeepMinMu=cms.double(0.0),   # floor only where count mu >= this
+    minKeepME11Only=cms.bool(False),  # floor only ME1/1 docs
     # Filled by read_norm_stats(); the producer throws if left empty.
     normalization=cms.PSet(
         wireMin=cms.vdouble(),

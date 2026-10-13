@@ -44,6 +44,12 @@ options.register('looseNRechitMin', 0,
 options.register('modelTag', '',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  "selects data/mds_hits_<tag>_{encoder,decoder}.onnx; empty = cfi default")
+options.register('minKeep', 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
+                 "per-doc floor on kept ML hits, K = max(minKeep, round(mu)); 0 = no floor")
+options.register('minKeepMinMu', 0.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+                 "apply the minKeep floor only to docs with count mu >= this")
+options.register('minKeepME11Only', False, VarParsing.multiplicity.singleton, VarParsing.varType.bool,
+                 "apply the minKeep floor only to ME1/1 docs")
 options.register('globalTag', '130X_mcRun3_2023_realistic_postBPix_v6',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  'Global tag; must match the production campaign')
@@ -184,6 +190,9 @@ process = add_mdsTables(
     looseNRechitMin=options.looseNRechitMin,
     MLmodelTag=options.modelTag or None,
 )
+process.mlCSCRecHits.minKeep = cms.int32(options.minKeep)
+process.mlCSCRecHits.minKeepMinMu = cms.double(options.minKeepMinMu)
+process.mlCSCRecHits.minKeepME11Only = cms.bool(options.minKeepME11Only)
 
 process.p.associate(process.nanoTableTaskCommon)
 

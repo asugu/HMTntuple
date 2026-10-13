@@ -313,7 +313,14 @@ private:
   const double stripAdcRangeThreshold_;
   const bool requireStripWirePair_;
   const unsigned int minFiredStrips_;
+  const int minKeep_;
+  const double minKeepMinMu_;
+  const bool minKeepME11Only_;
   const bool verbose_;
+  // Graph contract, read off the sessions (export_ragged_cmssw.py graph_io): v25a passes
+  // strips_emb A->B with det_idx_strips; v25b adds hit_sigma to B's outputs (unused here).
+  bool stripsToDecoder_ = false;
+  bool decoderHasSigma_ = false;
 
   // Input normalization constants, indexed [feature].
   std::array<double, kNWireFeat> wireMin_, wireMax_;
@@ -352,6 +359,9 @@ MLCSCRecHitProducer::MLCSCRecHitProducer(const edm::ParameterSet& iConfig)
       stripAdcRangeThreshold_(iConfig.getParameter<double>("stripAdcRangeThreshold")),
       requireStripWirePair_(iConfig.getParameter<bool>("requireStripWirePair")),
       minFiredStrips_(iConfig.getParameter<unsigned int>("minFiredStrips")),
+      minKeep_(iConfig.getParameter<int>("minKeep")),
+      minKeepMinMu_(iConfig.getParameter<double>("minKeepMinMu")),
+      minKeepME11Only_(iConfig.getParameter<bool>("minKeepME11Only")),
       verbose_(iConfig.getUntrackedParameter<bool>("verbose", false)),
       env_(ORT_LOGGING_LEVEL_WARNING, "MLCSCRecHitProducer") {
   if (encoderPath_.empty() || decoderPath_.empty()) {
@@ -404,6 +414,26 @@ MLCSCRecHitProducer::MLCSCRecHitProducer(const edm::ParameterSet& iConfig)
   decSession_ = std::make_unique<Ort::Session>(
       env_, edm::FileInPath(decoderPath_).fullPath().c_str(), opts);
 
+  // --- which graph contract these files carry ------------------------------
+  Ort::AllocatorWithDefaultOptions alloc;
+  auto names = [&](Ort::Session& s, bool inputs) {
+    std::vector<std::string> v;
+    const size_t n = inputs ? s.GetInputCount() : s.GetOutputCount();
+    for (size_t i = 0; i < n; ++i)
+      v.emplace_back(inputs ? s.GetInputNameAllocated(i, alloc).get() : s.GetOutputNameAllocated(i, alloc).get());
+    return v;
+  };
+  const auto encOutNames = names(*encSession_, false);
+  const auto decInNames = names(*decSession_, true);
+  const auto decOutNames = names(*decSession_, false);
+  const bool encStrips = encOutNames.size() == 5 && encOutNames[4] == "strips_emb";
+  stripsToDecoder_ = decInNames.size() == 8 && decInNames[6] == "strips_emb" && decInNames[7] == "det_idx_strips";
+  decoderHasSigma_ = decOutNames.size() == 3 && decOutNames[2] == "hit_sigma";
+  if (encStrips != stripsToDecoder_ || (encOutNames.size() != 4 && !encStrips) ||
+      (decInNames.size() != 6 && !stripsToDecoder_) || (decOutNames.size() != 2 && !decoderHasSigma_))
+    throw cms::Exception("Configuration") << "encoder/decoder graphs do not match a known contract "
+                                          << "(export_ragged_cmssw.py graph_io); re-export both from one run";
+
   produces<CSCRecHit2DCollection>();
 }
 
@@ -418,7 +448,8 @@ void MLCSCRecHitProducer::endStream() {
       << "events=" << nEvents_ << " docs=" << nDocsSeen_ << " hits=" << nHitsMade_
       << "\n  packed slots/event=" << std::fixed << std::setprecision(1) << meanSlots
       << "  (" << std::setprecision(1) << gain << "x fewer than the dense layout)"
-      << "  nKeepRule=" << nKeepRule_;
+      << "  nKeepRule=" << nKeepRule_ << "  minKeep=" << minKeep_ << "  minKeepMinMu=" << minKeepMinMu_
+      << "  minKeepME11Only=" << minKeepME11Only_ << "  stripsToDecoder=" << stripsToDecoder_;
 
   // A doc whose n_keep saturated the bucket lost real hits: the count head
   // asked for more slots than the graph provides. Rare truncation is the
@@ -455,6 +486,12 @@ void MLCSCRecHitProducer::fillDescriptions(edm::ConfigurationDescriptions& descr
       ->setComment(
           "minimum fired strips per chamber-layer; MUST equal event_datamaker.py's "
           "MIN_FIRED_STRIPS or the model sees layer occupancies it never trained on");
+  desc.add<int>("minKeep", 0)
+      ->setComment(
+          "per-doc floor on kept hits, K = max(minKeep, nKeepRule K), capped at the doc's slots");
+  desc.add<double>("minKeepMinMu", 0.0)
+      ->setComment("apply the minKeep floor only to docs with count mu >= this (0 = all)");
+  desc.add<bool>("minKeepME11Only", false)->setComment("apply the minKeep floor only to ME1/1 (ME1/a + ME1/b) docs");
 
   edm::ParameterSetDescription norm;
   norm.add<std::vector<double>>("wireMin", {});
@@ -776,7 +813,8 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
 
   static const char* kEncIn[] = {"wires",         "strips",         "doc_idx_wires", "doc_idx_strips",
                                  "det_idx_wires", "det_idx_strips", "det_idx_docs"};
-  static const char* kEncOut[] = {"wires_out", "doc_cond", "count_mu", "n_slots"};
+  static const char* kEncOut[] = {"wires_out", "doc_cond", "count_mu", "n_slots", "strips_emb"};
+  const size_t nEncOut = stripsToDecoder_ ? 5 : 4;
 
   std::vector<Ort::Value> encIn;
   encIn.push_back(Ort::Value::CreateTensor<float>(memInfo, wireFeat.data(), wireFeat.size(), shapeW.data(), 2));
@@ -791,7 +829,7 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
       Ort::Value::CreateTensor<int64_t>(memInfo, detIdxStrips.data(), detIdxStrips.size(), shapeIdxS.data(), 1));
   encIn.push_back(Ort::Value::CreateTensor<int64_t>(memInfo, detIdxDocs.data(), detIdxDocs.size(), shapeD.data(), 1));
 
-  auto encOut = encSession_->Run(Ort::RunOptions{nullptr}, kEncIn, encIn.data(), encIn.size(), kEncOut, 4);
+  auto encOut = encSession_->Run(Ort::RunOptions{nullptr}, kEncIn, encIn.data(), encIn.size(), kEncOut, nEncOut);
 
   const float* countMu = encOut[2].GetTensorData<float>();   // (nDocs,)
   const int32_t* nSlots = encOut[3].GetTensorData<int32_t>();  // (nDocs,)
@@ -832,9 +870,9 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
   const int64_t nSlot = static_cast<int64_t>(totalSlots);
   const std::array<int64_t, 1> shapeSlot{{nSlot}};
 
-  static const char* kDecIn[] = {"wires_out", "doc_cond", "det_idx_wires",
-                                 "doc_of_slot", "within", "hit_det_idx"};
-  static const char* kDecOut[] = {"hits", "exist_logit"};
+  static const char* kDecIn[] = {"wires_out", "doc_cond", "det_idx_wires", "doc_of_slot",
+                                 "within", "hit_det_idx", "strips_emb", "det_idx_strips"};
+  static const char* kDecOut[] = {"hits", "exist_logit", "hit_sigma"};
 
   std::vector<Ort::Value> decIn;
   // encOut[0] and encOut[1] are passed straight through: ORT owns those
@@ -848,8 +886,15 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
   decIn.push_back(Ort::Value::CreateTensor<int64_t>(memInfo, within.data(), within.size(), shapeSlot.data(), 1));
   decIn.push_back(
       Ort::Value::CreateTensor<int64_t>(memInfo, hitDetIdx.data(), hitDetIdx.size(), shapeSlot.data(), 1));
+  if (stripsToDecoder_) {
+    decIn.push_back(std::move(encOut[4]));
+    decIn.push_back(
+        Ort::Value::CreateTensor<int64_t>(memInfo, detIdxStrips.data(), detIdxStrips.size(), shapeIdxS.data(), 1));
+  }
 
-  auto decOut = decSession_->Run(Ort::RunOptions{nullptr}, kDecIn, decIn.data(), decIn.size(), kDecOut, 2);
+  // hit_sigma (v25b graphs) is requested only so ORT accepts the graph; MDS uses no LocalError
+  auto decOut = decSession_->Run(
+      Ort::RunOptions{nullptr}, kDecIn, decIn.data(), decIn.size(), kDecOut, decoderHasSigma_ ? 3 : 2);
 
   const float* hits = decOut[0].GetTensorData<float>();        // (S, 4) x,y,t,E
   const float* existLogit = decOut[1].GetTensorData<float>();  // (S,)
@@ -866,7 +911,12 @@ void MLCSCRecHitProducer::produce(edm::Event& iEvent, const edm::EventSetup& iSe
       const double sd = (static_cast<double>(nSlots[d]) - mu) / std::max(slotZ_, 1e-6);
       k = mu + slotZ_ * std::max(sd, 0.);
     }
-    const int kk = static_cast<int>(std::lround(k));
+    int kk = static_cast<int>(std::lround(k));
+    if (minKeep_ > 0 && mu >= minKeepMinMu_) {
+      const CSCDetId did(docRawId[d]);
+      if (!minKeepME11Only_ || (did.station() == 1 && (did.ring() == 1 || did.ring() == 4)))
+        kk = std::max(kk, minKeep_);
+    }
     nKeepVec[d] = std::max(0, std::min(kk, nSlots[d]));
   }
 
