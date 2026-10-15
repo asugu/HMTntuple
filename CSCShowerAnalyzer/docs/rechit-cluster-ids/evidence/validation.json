@@ -1,0 +1,30 @@
+{
+  "status": "PASS",
+  "events": 100,
+  "existing_branches_unchanged": 184,
+  "existing_values_compared_exactly": 549008,
+  "added_branches": [
+    "cscMDSClusterMLOfflineRechits_ClusterId",
+    "cscMDSClusterRechits_ClusterId",
+    "cscMLRechits_ClusterId"
+  ],
+  "clusters": {
+    "cscMDSCluster": {
+      "clusters": 19,
+      "hits": 6367,
+      "zero_cluster_events": 83,
+      "multi_cluster_events": 2
+    },
+    "cscMDSClusterMLOffline": {
+      "clusters": 42,
+      "hits": 7458,
+      "zero_cluster_events": 66,
+      "multi_cluster_events": 8
+    }
+  },
+  "raw_ml_hits": 14073,
+  "unclustered_ml_hits": 6615,
+  "baseline_sha256": "c66a1012eb4b9cac94b49c4242aaa9ac49d12d3db45f596d96862d484422e080",
+  "output_sha256": "800ab486fb5f8b511ba86db7d30147f7245a75998c97494bc909e659c0f54f16",
+  "output_bytes": 2570366
+}

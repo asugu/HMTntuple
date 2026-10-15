@@ -51,10 +51,13 @@ class cscMDSshowerTableProducer : public edm::global::EDProducer<> {
       stripErr_(iConfig.getParameter<double>("stripErr")),
       wireError_(iConfig.getParameter<double>("wireError")),
       pruneCut_(iConfig.getParameter<double>("pruneCut")),
-      name_(iConfig.getParameter<std::string>("name"))
+      name_(iConfig.getParameter<std::string>("name")),
+      rechitTable_(iConfig.getParameter<std::string>("rechitTable"))
       {
       produces<nanoaod::FlatTable>(name_+"Rechits");
       produces<nanoaod::FlatTable>(name_);
+      if (!rechitTable_.empty())
+        produces<nanoaod::FlatTable>(name_+"RechitClusterIds");
     }
 
     ~cscMDSshowerTableProducer() override {}
@@ -71,6 +74,7 @@ class cscMDSshowerTableProducer : public edm::global::EDProducer<> {
       desc.add<double>("wireError", 8.6);
       desc.add<double>("pruneCut", 9.0);
       desc.add<std::string>("name","cscRechits")->setComment("name of the output collection");
+      desc.add<std::string>("rechitTable", "")->setComment("Existing full rechit table to extend with ClusterId; empty disables the extension");
       descriptions.add("cscMDSshowerTable", desc);
     }
     float getWeightedTime(RecHitRefVector rechits) const;
@@ -89,6 +93,7 @@ class cscMDSshowerTableProducer : public edm::global::EDProducer<> {
     const int nStationThres_;  // min number of rechits to count towards nStation 
     const double stripErr_,wireError_,pruneCut_; //constants for CSC time
     const std::string name_;
+    const std::string rechitTable_;
 };
 
 //From: https://github.com/cms-sw/cmssw/blob/master/RecoMuon/MuonIdentification/src/CSCTimingExtractor.cc#L165-L234
@@ -180,6 +185,9 @@ void cscMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const
   std::vector<int> cscRechitsNStrips,cscRechitsHitWire,cscRechitsWGroupsBX,cscRechitsNWireGroups,cscRechitsQuality,cscRechitsChamber,cscRechitsIChamber,cscRechitsStation;;
 
   // MDS fields
+  std::vector<int> cscRechitsClusterId;
+  // Indexed by the original CSCRecHit2DCollection, not by FastJet ordering.
+  std::vector<int> inputClusterIds(rechits.size(), -1);
   std::vector<float> clsX,clsY,clsZ,clsPhi,clsEta,clsTime,clsTimeSpread,clsTimeWeighted,clsTimeSpreadWeighted,clsAvgStation;
   std::vector<int> clsSize,clsNstation,cls_nME11,cls_nME12,clsUniqueChamber,cls_nMB1dtSeg,cls_nRE12hit,cls_nRB1hit;
 
@@ -187,6 +195,8 @@ void cscMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const
     // skip if the cluster has too few rechits
     if (int(fjJet.constituents().size()) < nRechitMin_)
       continue;
+    // The next saved cluster row; preserve the existing inclusive_jets order.
+    const int clusterId = static_cast<int>(clsSize.size());
     // get the constituents from fastjet
     RecHitRefVector rechits;
     for (auto const& constituent : fjJet.constituents()) {
@@ -221,6 +231,8 @@ void cscMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const
         GlobalPoint globalPosition = thischamber->toGlobal(recHitLocalPosition);
     
         cscRechitsX.push_back( globalPosition.x());
+        cscRechitsClusterId.push_back(clusterId);
+        inputClusterIds.at(rechit.key()) = clusterId;
         cscRechitsY.push_back( globalPosition.y());
         cscRechitsZ.push_back( globalPosition.z());
         cscRechitsPhi.push_back( globalPosition.phi());
@@ -361,9 +373,18 @@ void cscMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const
   cscRechitTab->addColumn<int>("WGroupsBX", cscRechitsWGroupsBX, "csc rechit wire group BX");
   cscRechitTab->addColumn<int>("HitWire",    cscRechitsHitWire, "csc rechit hit wire");
   cscRechitTab->addColumn<int>("NWireGroups", cscRechitsNWireGroups, "csc rechit n wire groups");
+  cscRechitTab->addColumn<int>("ClusterId", cscRechitsClusterId,
+      "Zero-based row in " + name_ + "; only constituents of saved clusters are present");
 
 
   iEvent.put(std::move(cscRechitTab), name_+"Rechits"); 
+
+  if (!rechitTable_.empty()) {
+    auto idsTab = std::make_unique<nanoaod::FlatTable>(inputClusterIds.size(), rechitTable_, false, true);
+    idsTab->addColumn<int>("ClusterId", inputClusterIds,
+        "Zero-based row in " + name_ + "; -1 means no saved offline cluster");
+    iEvent.put(std::move(idsTab), name_+"RechitClusterIds");
+  }
 
   auto clsTab = std::make_unique<nanoaod::FlatTable>(clsSize.size(), name_, false, false);
 
