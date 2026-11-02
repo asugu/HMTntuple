@@ -26,10 +26,9 @@ from FWCore.ParameterSet.VarParsing import VarParsing
 from Configuration.Eras.Era_Run3_cff import Run3
 
 options = VarParsing('analysis')
-options.register('statsPath',
-                 '$CMSSW_BASE/src/HMTntuple/CSCShowerAnalyzer/data/norm_stats_SH_event_cluster.json',
+options.register('statsPath', '',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
-                 'norm_stats_SH_*.json used to train the ONNX graphs')
+                 'CSC normalisation json; empty = the export sidecar data/mds_hits_<modelTag>.json')
 options.register('saveMLrechits', False,
                  VarParsing.multiplicity.singleton, VarParsing.varType.bool,
                  'Also store the ML rechits themselves, not just the clusters')
@@ -44,13 +43,24 @@ options.register('looseNRechitMin', 0,
 options.register('modelTag', '',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  "selects data/mds_hits_<tag>_{encoder,decoder}.onnx; empty = cfi default")
+options.register('mlDT', True, VarParsing.multiplicity.singleton, VarParsing.varType.bool,
+                 "also run the ML DT model (mlDTRecHits; runs the DT unpacker)")
+options.register('dtModelTag', '', VarParsing.multiplicity.singleton, VarParsing.varType.string,
+                 "selects data/mds_dt_hits_<tag>_{encoder,decoder}.onnx; empty = cfi default")
+options.register('jointClusters', True, VarParsing.multiplicity.singleton, VarParsing.varType.bool,
+                 "cluster ML CSC + ML DT hits together (muonMDSClusterML table); needs mlDT")
 options.register('minKeep', 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
                  "per-doc floor on kept ML hits, K = max(minKeep, round(mu)); 0 = no floor")
 options.register('minKeepMinMu', 0.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
                  "apply the minKeep floor only to docs with count mu >= this")
-options.register('minKeepME11Only', False, VarParsing.multiplicity.singleton, VarParsing.varType.bool,
-                 "apply the minKeep floor only to ME1/1 docs")
-options.register('globalTag', '130X_mcRun3_2023_realistic_postBPix_v6',
+options.register('dtMinKeep', 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
+                 "DT twin of minKeep (mlDTRecHits); 0 = no floor")
+options.register('dtMinKeepMinMu', 0.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+                 "DT twin of minKeepMinMu")
+options.register('unpack', False, VarParsing.multiplicity.singleton, VarParsing.varType.bool,
+                 "re-unpack CSC/DT digis + CSC rechits from rawDataCollector; False = read the input's RECO "
+                 "muonCSCDigis/muonDTDigis/csc2DRecHits (classical-mix skims carry no full raw)")
+options.register('globalTag', '133X_mcRun3_2024_realistic_v8',
                  VarParsing.multiplicity.singleton, VarParsing.varType.string,
                  'Global tag; must match the production campaign')
 options.parseArguments()
@@ -65,6 +75,8 @@ process.MessageLogger.cerr.FwkReport.reportEvery = 10
 # occurrence cap. Verbosity only.
 process.MessageLogger.cerr.threshold = 'INFO'
 process.MessageLogger.cerr.MLCSCRecHitProducer = cms.untracked.PSet(
+    limit=cms.untracked.int32(-1))
+process.MessageLogger.cerr.MLDTRecHitProducer = cms.untracked.PSet(
     limit=cms.untracked.int32(-1))
 
 process.load('Configuration.StandardSequences.Services_cff')
@@ -90,6 +102,8 @@ process.maxEvents = cms.untracked.PSet(
 # standard CSC local reco needs the same digis. Nothing else in this job reads
 # tracker/calo digis, so the full RawToDigi sequence is not run.
 process.load('EventFilter.CSCRawToDigi.cscUnpacker_cfi')
+# DT digis for mlDTRecHits: unpacked from RAW, as the classical-mix training ntuples (muonDigiSource=unpacked)
+process.load('EventFilter.DTRawToDigi.dtunpacker_cfi')
 
 # ES products the CSC unpacker needs, which the plain RAW workflow does not
 # pull in on its own (same boilerplate as runCSCShowerAnalyzer_cfg.py).
@@ -115,7 +129,16 @@ process.CSCChannelMapperESProducer = cms.ESProducer(
 # MLrechits=True, clusters mlCSCRecHits into cscMDSClusterML alongside.
 process.load('RecoLocalMuon.CSCRecHitD.cscRecHitD_cfi')
 
-process.recoTask = cms.Task(process.muonCSCDigis, process.csc2DRecHits)
+process.recoTask = cms.Task()
+if options.unpack:
+    process.recoTask.add(process.muonCSCDigis, process.csc2DRecHits)
+    if options.mlDT:
+        process.recoTask.add(process.muonDTDigis)
+else:
+    # unscheduled clones would shadow the input's RECO products, so drop them
+    for _m in ('muonCSCDigis', 'csc2DRecHits', 'muonDTDigis'):
+        if hasattr(process, _m):
+            delattr(process, _m)
 
 # --- gen --------------------------------------------------------------------
 # The stock nano genParticleTable prunes from prunedGenParticles, a PAT product
@@ -189,10 +212,15 @@ process = add_mdsTables(
     MLstatsPath=options.statsPath or None,
     looseNRechitMin=options.looseNRechitMin,
     MLmodelTag=options.modelTag or None,
+    MLdtRechits=options.mlDT,
+    MLdtModelTag=options.dtModelTag or None,
+    MLjointClusters=options.jointClusters and options.mlDT,
 )
 process.mlCSCRecHits.minKeep = cms.int32(options.minKeep)
 process.mlCSCRecHits.minKeepMinMu = cms.double(options.minKeepMinMu)
-process.mlCSCRecHits.minKeepME11Only = cms.bool(options.minKeepME11Only)
+if options.mlDT:
+    process.mlDTRecHits.minKeep = cms.int32(options.dtMinKeep)
+    process.mlDTRecHits.minKeepMinMu = cms.double(options.dtMinKeepMinMu)
 
 process.p.associate(process.nanoTableTaskCommon)
 

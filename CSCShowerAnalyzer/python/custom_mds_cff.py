@@ -85,7 +85,11 @@ dtSegmentsTable = dtSegmentsTable.clone(
 
 def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
                   MLrechits=False, saveMLrechits=False, MLstatsPath=None,
-                  looseNRechitMin=0, MLmodelTag=None):
+                  looseNRechitMin=0, MLmodelTag=None,
+                  MLdtRechits=False, MLdtModelTag=None, MLjointClusters=False):
+    # MLdtRechits: DT twin of MLrechits (mlDTRecHits -> DTRecHitCollection, needs muonDTDigis).
+    # MLjointClusters: one CA clustering over ML CSC + ML DT hits together (muonMDSClusterML table);
+    # needs both. MLstatsPath / MLmodelTag: CSC graphs + sidecar data/mds_hits_<tag>{_encoder,_decoder}.onnx/.json
     # looseNRechitMin > 0 adds a SECOND pair of offline shower tables with the
     # cluster hit threshold lowered from the default 50. It measures the
     # efficiency CEILING: the nominal denominator is purely geometric (LLP
@@ -124,6 +128,11 @@ def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
             nRechitMin = cms.int32(looseNRechitMin),
         )
         process.MDSTask.add(process.cscMDSshowerTableLoose)
+        process.dtMDSshowerTableLoose = dtMDSshowerTable.clone(
+            name = cms.string("dtMDSClusterLoose"),
+            nRechitMin = cms.int32(looseNRechitMin),
+        )
+        process.MDSTask.add(process.dtMDSshowerTableLoose)
 
     if MDSshowerDigi:
         process.load("CalibMuon.CSCCalibration.CSCL1TPLookupTableEP_cff")
@@ -200,12 +209,14 @@ def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
         #
         # Needs digis, so this only works on RAW (see MDSshowerDigi above for
         # the unpacker). On AOD there are no wire/strip digis to read.
+        import os
         from HMTntuple.CSCShowerAnalyzer.mlCSCRecHits_cfi import (
-            mlCSCRecHits, read_norm_stats, MODEL_DIR)
+            mlCSCRecHits, read_norm_stats, MODEL_DIR, DEFAULT_TAG)
 
         process.mlCSCRecHits = mlCSCRecHits
-        if MLstatsPath is not None:
-            process.mlCSCRecHits.normalization = read_norm_stats(MLstatsPath)
+        # normalisation travels with the graphs: the export sidecar data/mds_hits_<tag>.json
+        process.mlCSCRecHits.normalization = read_norm_stats(MLstatsPath or os.path.join(
+            os.environ["CMSSW_BASE"], "src", MODEL_DIR, "mds_hits_%s.json" % (MLmodelTag or DEFAULT_TAG)))
         # MLmodelTag selects data/mds_hits_<tag>_{encoder,decoder}.onnx
         if MLmodelTag:
             process.mlCSCRecHits.encoderPath = cms.string(
@@ -220,10 +231,8 @@ def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
             src  = cms.InputTag("ca4CSCrechitClustersML"),
             name = cms.string("cscMDSClusterML"),
             doc  = cms.string("MDS cluster built from ML-regressed CSC rechits. "
-                              "NOTE: time and timeSpread are NOT physics-meaningful "
-                              "yet -- the model's per-hit time is prompt-only and has "
-                              "no out-of-time handle, so these must not be used for "
-                              "background rejection.")
+                              "Time = ML hit time, TOF - OFF ns (prompt muon = 0), not the "
+                              "rechit convention: do not port time cuts from standard clusters.")
         )
 
         # --- offline-style ML clusters -------------------------------------
@@ -304,6 +313,67 @@ def add_mdsTables(process, MDSshowerDigi=False, saveRechits=False,
                 name = cms.string("cscMLRechits")
             )
             process.MDSTask.add(process.mlCSCRechitsTable)
+
+    if MLdtRechits:
+        # DT twin: ML DT hits as DTRecHit1DPair (left = right = predicted local x, y), so the stock DT
+        # clusterer and the DT tables run on a clone. ca4 (HLT) uses the CHAMBER frame for DT local
+        # positions, like it does for real rechits; dtMDSshowerTable (offline) uses the layer frame.
+        import os
+        from HMTntuple.CSCShowerAnalyzer.mlDTRecHits_cfi import mlDTRecHits, read_dt_norm, MODEL_DIR as DT_DIR, \
+            DEFAULT_TAG as DT_TAG
+        tag = MLdtModelTag or DT_TAG
+        process.mlDTRecHits = mlDTRecHits.clone(
+            encoderPath = cms.string("%s/mds_dt_hits_%s_encoder.onnx" % (DT_DIR, tag)),
+            decoderPath = cms.string("%s/mds_dt_hits_%s_decoder.onnx" % (DT_DIR, tag)),
+            normalization = read_dt_norm(os.path.join(os.environ["CMSSW_BASE"], "src", DT_DIR,
+                                                      "mds_dt_hits_%s.json" % tag)),
+        )
+        process.ca4DTrechitClustersML = dtRechitClusterProducer.clone(recHitLabel = "mlDTRecHits")
+        process.dtMDSClusterTableML = dtMDSClusterTable.clone(
+            src  = cms.InputTag("ca4DTrechitClustersML"),
+            name = cms.string("dtMDSClusterML"),
+            doc  = cms.string("MDS cluster built from ML-regressed DT hits (stock DT clusterer)"),
+        )
+        # hitInfoLabel: per-hit energy / unquantised time, which DTRecHit1DPair cannot carry
+        process.dtMDSshowerTableML = dtMDSshowerTable.clone(
+            recHitLabel = cms.InputTag("mlDTRecHits"),
+            hitInfoLabel = cms.string("mlDTRecHits"),
+            name = cms.string("dtMDSClusterMLOffline"),
+        )
+        for m in ("mlDTRecHits", "ca4DTrechitClustersML", "dtMDSClusterTableML", "dtMDSshowerTableML"):
+            process.MDSTask.add(getattr(process, m))
+        if looseNRechitMin > 0:
+            process.dtMDSshowerTableMLLoose = process.dtMDSshowerTableML.clone(
+                name = cms.string("dtMDSClusterMLOfflineLoose"),
+                nRechitMin = cms.int32(looseNRechitMin),
+            )
+            process.MDSTask.add(process.dtMDSshowerTableMLLoose)
+        if saveMLrechits:
+            process.mlDTRechitsTable = dtRechitsTable.clone(
+                recHitLabel = cms.InputTag("mlDTRecHits"),
+                hitInfoLabel = cms.string("mlDTRecHits"),
+                name = cms.string("dtMLRechits")
+            )
+            process.MDSTask.add(process.mlDTRechitsTable)
+
+    if MLjointClusters:
+        if not (MLrechits and MLdtRechits):
+            raise RuntimeError("MLjointClusters needs MLrechits=True and MLdtRechits=True")
+        from HMTntuple.CSCShowerAnalyzer.muonMDSClusterTable_cfi import muonMDSClusterTable
+        process.muonMDSClusterTableML = muonMDSClusterTable.clone(
+            cscRecHitLabel = cms.InputTag("mlCSCRecHits"),
+            dtRecHitLabel = cms.InputTag("mlDTRecHits"),
+            name = cms.string("muonMDSClusterML"),
+            saveHits = cms.bool(saveMLrechits),
+        )
+        process.MDSTask.add(process.muonMDSClusterTableML)
+        if looseNRechitMin > 0:
+            process.muonMDSClusterTableMLLoose = process.muonMDSClusterTableML.clone(
+                name = cms.string("muonMDSClusterMLLoose"),
+                nRechitMin = cms.int32(looseNRechitMin),
+                saveHits = cms.bool(False),
+            )
+            process.MDSTask.add(process.muonMDSClusterTableMLLoose)
 
     process.nanoTableTaskCommon.add(process.MDSTask)
 
