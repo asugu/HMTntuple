@@ -23,6 +23,8 @@
 #include "Geometry/RPCGeometry/interface/RPCGeometry.h"
 #include "Geometry/Records/interface/MuonGeometryRecord.h"
 
+#include "FWCore/Utilities/interface/Exception.h"
+
 #include "fastjet/ClusterSequence.hh"
 #include "fastjet/JetDefinition.hh"
 #include "fastjet/PseudoJet.hh"
@@ -45,6 +47,11 @@ class dtMDSshowerTableProducer : public edm::global::EDProducer<> {
       nStationThres_(iConfig.getParameter<int>("nStationThres")),
       name_(iConfig.getParameter<std::string>("name"))
       {
+      const auto info = iConfig.getParameter<std::string>("hitInfoLabel");
+      if (!info.empty()) {
+        energyToken_ = consumes<std::vector<float>>(edm::InputTag(info, "energy"));
+        timeToken_ = consumes<std::vector<float>>(edm::InputTag(info, "time"));
+      }
       produces<nanoaod::FlatTable>(name_+"Rechits");
       produces<nanoaod::FlatTable>(name_);
     }
@@ -59,6 +66,8 @@ class dtMDSshowerTableProducer : public edm::global::EDProducer<> {
       desc.add<int>("nRechitMin", 50);
       desc.add<int>("nStationThres", 10);
       desc.add<std::string>("name","dt1DRecHits")->setComment("name of the output collection");
+      desc.add<std::string>("hitInfoLabel", "")->setComment(
+          "module with per-hit std::vector<float> energy/time (MLDTRecHitProducer); empty = real rechits");
       descriptions.add("dtMDSshowerTable", desc);
     }
     float getWeightedTime(RecHitRefVector rechits) const;
@@ -70,6 +79,7 @@ class dtMDSshowerTableProducer : public edm::global::EDProducer<> {
     const edm::ESGetToken<RPCGeometry, MuonGeometryRecord> rpcgeometryToken_;
     edm::EDGetTokenT<DTRecHitCollection> inputToken_;
     edm::EDGetTokenT<RPCRecHitCollection> rpchitToken_;
+    edm::EDGetTokenT<std::vector<float>> energyToken_, timeToken_;
     const double rParam_;
     const int nRechitMin_;     // min number of rechits
     const int nStationThres_;  // min number of rechits to count towards nStation 
@@ -83,6 +93,10 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
   auto const& rpc_geo = iSetup.getData(rpcgeometryToken_);
   auto const& rechits = iEvent.get(inputToken_);
   auto const& rpchits = iEvent.get(rpchitToken_);
+  const std::vector<float>* hitE = energyToken_.isUninitialized() ? nullptr : &iEvent.get(energyToken_);
+  const std::vector<float>* hitT = timeToken_.isUninitialized() ? nullptr : &iEvent.get(timeToken_);
+  if (hitE && (hitE->size() != rechits.size() || hitT->size() != rechits.size()))
+    throw cms::Exception("LogicError") << "DT hit info size " << hitE->size() << " != rechits " << rechits.size();
 
   std::set<DTChamberId> unique_ids;
   std::vector<fastjet::PseudoJet> fjInput;
@@ -126,11 +140,11 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
   std::vector<fastjet::PseudoJet> fjJets = clus_seq.inclusive_jets(ptmin);
 
   // Constituent rechit fields
-  std::vector<float> dtRechitsX,dtRechitsY,dtRechitsZ,dtRechitsPhi,dtRechitsEta;
+  std::vector<float> dtRechitsX,dtRechitsY,dtRechitsZ,dtRechitsPhi,dtRechitsEta,dtRechitsTime,dtRechitsE;
   std::vector<int> dtRechitsLayer,dtRechitsSuperLayer,dtRechitsSector,dtRechitsStation,dtRechitsWheel;
 
   // MDS fields
-  std::vector<float> clsX,clsY,clsZ,clsPhi,clsEta,clsAvgStation;
+  std::vector<float> clsX,clsY,clsZ,clsPhi,clsEta,clsAvgStation,clsTime,clsTimeSpread;
   std::vector<int> clsSize,clsNstation,clsWheel,clsUniqueChamber,cls_nRB1hit,cls_nRPC,clsBX;
 
   for (auto const& fjJet : fjJets) {
@@ -152,6 +166,7 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
     float avg_x(0.0), avg_y(0.0), avg_z(0.0);
     int nStation = 0;
     int totStation = 0;
+    double sumT = 0., sumT2 = 0.;
     float avgStation = 0.0;
 
     std::map<int, int> station_count_map;
@@ -212,6 +227,11 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
           dtRechitsSector.push_back( dtdetid.sector());
           dtRechitsStation.push_back( dtdetid.station());
           dtRechitsWheel.push_back( dtdetid.wheel());
+          const float t = hitT ? (*hitT)[rechit.key()] : rechit->digiTime();
+          dtRechitsTime.push_back(t);
+          dtRechitsE.push_back(hitE ? (*hitE)[rechit.key()] : -999.f);
+          sumT += t;
+          sumT2 += double(t) * t;
           size++; 
         
           //compute for cluster fields
@@ -309,6 +329,9 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
     clsNstation.push_back(nStation);
     clsAvgStation.push_back(avgStation);
     clsWheel.push_back(i_clsWheel);
+    const double meanT = size > 0 ? sumT / size : 0.;
+    clsTime.push_back(meanT);
+    clsTimeSpread.push_back(size > 0 ? std::sqrt(std::max(0., sumT2 / size - meanT * meanT)) : 0.);
     clsUniqueChamber.push_back(unique_ids.size());
     cls_nRB1hit.push_back(nRB1hit);
     cls_nRPC.push_back(i_cls_nRPC);
@@ -326,6 +349,8 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
   dtRechitTab->addColumn<int>("Sector", dtRechitsSector, "dt rechit sector");
   dtRechitTab->addColumn<int>("Station", dtRechitsStation, "dt rechit station");
   dtRechitTab->addColumn<int>("Wheel", dtRechitsWheel, "dt rechit nstrips");
+  dtRechitTab->addColumn<float>("Time", dtRechitsTime, "dt rechit time ns: ML = TOF - OFF_DT (prompt 0); real = raw digi time");
+  dtRechitTab->addColumn<float>("E", dtRechitsE, "dt rechit energy GeV (ML only; -999 for real rechits)");
 
   iEvent.put(std::move(dtRechitTab), name_+"Rechits"); 
 
@@ -342,6 +367,8 @@ void dtMDSshowerTableProducer::produce(edm::StreamID, edm::Event& iEvent, const 
   clsTab->addColumn<int>("nStation", clsNstation, "cluster nStation");
   clsTab->addColumn<int>("uniqueChamber", clsUniqueChamber, "cluster unique chambers");
   clsTab->addColumn<float>("avgStation", clsAvgStation, "cluster AvgStation");
+  clsTab->addColumn<float>("time", clsTime, "cluster mean hit time ns (ML: TOF - OFF_DT; real: raw digi time)");
+  clsTab->addColumn<float>("timeSpread", clsTimeSpread, "cluster hit time RMS ns");
   clsTab->addColumn<int>("nRPC", cls_nRPC, "cluster nRPC");
   clsTab->addColumn<int>("nRB1hit", cls_nRB1hit, "cluster nRB1hit");
 

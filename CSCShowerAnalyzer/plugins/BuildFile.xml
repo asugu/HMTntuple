@@ -13,6 +13,11 @@
 <use name="rootgraphics"/>
 <use name="PhysicsTools/UtilAlgos"/>
 <use name="DataFormats/CSCRecHit"/>
+<use name="DataFormats/DTDigi"/>
+<use name="DataFormats/DTRecHit"/>
+<use name="DataFormats/MuonDetId"/>
+<use name="DataFormats/MuonReco"/>
+<use name="CalibMuon/DTDigiSync"/>
 <use name="DataFormats/GeometrySurface"/>
 <use name="PhysicsTools/ONNXRuntime"/>
 <use name="onnxruntime"/>
