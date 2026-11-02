@@ -3,83 +3,40 @@ import os
 
 import FWCore.ParameterSet.Config as cms
 
-# ---------------------------------------------------------------------------
-# Feature order.
-#
-# This is the order the network was trained with. It is not alphabetical and
-# not source order -- the training pipeline built the column list from a Python
-# set union, so the order is whatever that set iteration produced, and it was
-# then frozen into every normalized training file and into the weights.
-#
-# The lists are repeated here (they also live in MLCSCRecHitProducer.cc) so the
-# stats can be pulled out of norm_stats_SH_large.json by name rather than by
-# position. read_norm_stats() below asserts the two agree, which is the point:
-# a future retrain that reorders anything fails loudly at configuration time
-# instead of silently feeding the model transposed features.
-# ---------------------------------------------------------------------------
-
-# 6 wire/strip (x,y) columns use the layer trapezoid frame; their min/max entries are unused
-WIRE_FEATURES = [
-    "cscWireDigiTimeBinsOn%d" % i for i in range(16)
-] + [
-    "cscWireDigiStartX", "cscWireDigiStartY", "cscWireDigiStartZ",
-    "cscWireDigiEndX", "cscWireDigiEndY", "cscWireDigiEndZ",
-    "cscWireDigiCenterX", "cscWireDigiCenterY", "cscWireDigiCenterZ",
-    "cscWireDigiLength", "cscWireDigiWireGroup", "cscWireDigiDetID",
-]
-
-STRIP_FEATURES = [
-    "cscStripDigiADC_%d" % i for i in range(8)
-] + [
-    "cscStripStartX", "cscStripStartY", "cscStripStartZ",
-    "cscStripEndX", "cscStripEndY", "cscStripEndZ",
-    "cscStripDigiLayerX", "cscStripDigiLayerY", "cscStripDigiLayerZ",
-    "cscStripLength", "cscStripDigiStripNumber", "cscStripDigiDetID",
-]
+MODEL_DIR = "HMTntuple/CSCShowerAnalyzer/data"
+DEFAULT_TAG = "cm_csc_v1"
 
 
 def read_norm_stats(stats_path):
-    """Load minmax stats from norm_stats_SH_*.json into a cms.PSet.
-
-    Reading the file the training wrote, rather than transcribing 96 floats
-    into this config, means a retrain is a file swap. The length checks below
-    catch the case where a new stats file has a different feature count.
-    """
+    """Classical-mix normalisation from the export sidecar <stem>.json (key "norm", written by
+    mds-ml/onnx/export_ragged_cmssw.py from flex_atten/stats/classicalmix_csc.json) into a cms.PSet.
+    A bare classicalmix_csc.json is accepted too."""
     stats_path = os.path.expandvars(stats_path)
     with open(stats_path) as f:
         stats = json.load(f)
-
-    for group, expected in (("wires", WIRE_FEATURES), ("strips", STRIP_FEATURES)):
-        if group not in stats:
-            raise RuntimeError("%s: missing '%s' group" % (stats_path, group))
-        entry = stats[group]
-        method = entry.get("method", "minmax")
-        if method != "minmax":
-            raise RuntimeError(
-                "%s: '%s' uses method '%s'; the producer only implements minmax"
-                % (stats_path, group, method))
-        for key in ("min", "max"):
-            if len(entry[key]) != len(expected):
-                raise RuntimeError(
-                    "%s: '%s' %s has %d entries, expected %d (feature order changed?)"
-                    % (stats_path, group, key, len(entry[key]), len(expected)))
-
-    # output: x,y in cm; t z-scored, E z-scored in log10 (needs pow10)
-    for group, method in (("simhits_time", "std"),
-                          ("simhits_energy", "std")):
-        if group not in stats:
-            raise RuntimeError("%s: missing '%s' group" % (stats_path, group))
-        got = stats[group].get("method", "minmax")
-        if got != method:
-            raise RuntimeError(
-                "%s: '%s' uses method '%s', the producer inverts '%s'"
-                % (stats_path, group, got, method))
-
+    stats = stats.get("norm", stats)
+    if stats.get("layout") != "csc_classicalmix_v1":
+        raise RuntimeError("%s: layout %r, the producer builds csc_classicalmix_v1 inputs"
+                           % (stats_path, stats.get("layout")))
+    for group in ("simhits_time", "simhits_energy"):
+        if stats[group].get("method") != "std":
+            raise RuntimeError("%s: '%s' is not a z-score" % (stats_path, group))
+    mm, lc, trap = stats["minmax"], stats["layer_centre"], stats["trapezoid"]
+    keys = sorted(trap, key=lambda k: tuple(int(x) for x in k.split(",")))   # "station,raw ring"
+    if len(lc["min"]) != 3 or len(lc["max"]) != 3:
+        raise RuntimeError("%s: layer_centre needs 3 entries" % stats_path)
     return cms.PSet(
-        wireMin=cms.vdouble(*[float(v) for v in stats["wires"]["min"]]),
-        wireMax=cms.vdouble(*[float(v) for v in stats["wires"]["max"]]),
-        stripMin=cms.vdouble(*[float(v) for v in stats["strips"]["min"]]),
-        stripMax=cms.vdouble(*[float(v) for v in stats["strips"]["max"]]),
+        adcMin=cms.double(mm["adc"]["min"]), adcMax=cms.double(mm["adc"]["max"]),
+        stripNumberMin=cms.double(mm["strip_number"]["min"]), stripNumberMax=cms.double(mm["strip_number"]["max"]),
+        wireGroupMin=cms.double(mm["wire_group"]["min"]), wireGroupMax=cms.double(mm["wire_group"]["max"]),
+        wireWidthMin=cms.double(mm["wire_width"]["min"]), wireWidthMax=cms.double(mm["wire_width"]["max"]),
+        layerCentreMin=cms.vdouble(*[float(v) for v in lc["min"]]),
+        layerCentreMax=cms.vdouble(*[float(v) for v in lc["max"]]),
+        trapKey=cms.vint32(*[int(k.split(",")[0]) * 10 + int(k.split(",")[1]) for k in keys]),
+        trapVLo=cms.vdouble(*[float(trap[k]["v_lo"]) for k in keys]),
+        trapVHi=cms.vdouble(*[float(trap[k]["v_hi"]) for k in keys]),
+        trapHwLo=cms.vdouble(*[float(trap[k]["hw_lo"]) for k in keys]),
+        trapHwHi=cms.vdouble(*[float(trap[k]["hw_hi"]) for k in keys]),
         timeMean=cms.double(float(stats["simhits_time"]["mean"][0])),
         timeStd=cms.double(float(stats["simhits_time"]["std"][0])),
         energyMean=cms.double(float(stats["simhits_energy"]["mean"][0])),
@@ -88,52 +45,20 @@ def read_norm_stats(stats_path):
     )
 
 
-MODEL_DIR = "HMTntuple/CSCShowerAnalyzer/data"
-
 mlCSCRecHits = cms.EDProducer(
     "MLCSCRecHitProducer",
     wireDigiLabel=cms.InputTag("muonCSCDigis", "MuonCSCWireDigi"),
     stripDigiLabel=cms.InputTag("muonCSCDigis", "MuonCSCStripDigi"),
-    # encoder reports n_slots per doc; decoder runs on exactly those slots
-    encoderPath=cms.string("%s/mds_hits_v25abc_encoder.onnx" % MODEL_DIR),
-    decoderPath=cms.string("%s/mds_hits_v25abc_decoder.onnx" % MODEL_DIR),
-    # kept hits per doc: "mean" = round(count_mu), "upper" = round(mu + slotZ*sd), ~3x more
+    encoderPath=cms.string("%s/mds_hits_%s_encoder.onnx" % (MODEL_DIR, DEFAULT_TAG)),
+    decoderPath=cms.string("%s/mds_hits_%s_decoder.onnx" % (MODEL_DIR, DEFAULT_TAG)),
+    # kept hits per doc: "mean" = round(count_mu) (offline decode), "upper" = round(mu + slotZ*sd)
     nKeepRule=cms.string("mean"),
-    # Must equal the run's slot_z; only used by nKeepRule="upper".
-    slotZ=cms.double(2.0),
-    # Training kept a strip when max(ADC) - min(ADC) exceeded this.
+    slotZ=cms.double(2.0),   # the run's slot_z
+    # fired strip, as the ntupler (cscStripFiredOnly) and the packer: max(ADC) - min(ADC) > 13.3
     stripAdcRangeThreshold=cms.double(13.3),
-    # Training built docs only from chamber-layers carrying both views.
-    requireStripWirePair=cms.bool(True),
-    # Minimum fired strips per chamber-layer.
-    #
-    # MUST equal event_datamaker.py's MIN_FIRED_STRIPS (currently 3), and the
-    # ADC threshold above must equal data_maker's STRIP_ADC_THRESHOLD, since
-    # "fired" is defined by that cut on both sides. The training documents are
-    # built with exactly this rule; a mismatch feeds the model layer
-    # occupancies it never saw, with no error to notice.
-    #
-    # NOTE: this only matches a model trained with --docs strip_wire. A
-    # checkpoint trained on the older rechit-gated documents expects a
-    # different layer population entirely.
-    # Must equal event_datamaker.py's MIN_FIRED_STRIPS (flex_atten/
-    # make_event_cluster.py). 2 since the Sep-2026 rebuild.
-    minFiredStrips=cms.uint32(2),
-    # per-doc floor on kept hits: K = max(minKeep, round(mu)); 0 = plain round(mu)
     minKeep=cms.int32(0),
-    minKeepMinMu=cms.double(0.0),   # floor only where count mu >= this
-    minKeepME11Only=cms.bool(False),  # floor only ME1/1 docs
-    # Filled by read_norm_stats(); the producer throws if left empty.
-    normalization=cms.PSet(
-        wireMin=cms.vdouble(),
-        wireMax=cms.vdouble(),
-        stripMin=cms.vdouble(),
-        stripMax=cms.vdouble(),
-        timeMean=cms.double(0.),
-        timeStd=cms.double(1.),
-        energyMean=cms.double(0.),
-        energyStd=cms.double(1.),
-        energyLogEps=cms.double(1e-12),
-    ),
+    minKeepMinMu=cms.double(0.0),
+    # filled by read_norm_stats(<stem>.json); the producer throws if left empty
+    normalization=cms.PSet(),
     verbose=cms.untracked.bool(False),
 )

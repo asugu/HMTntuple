@@ -1,0 +1,277 @@
+{
+  "checkpoint": "/data/dust/user/guvenlia/mds-ml/flex_atten/runs/CA_SH_cm_csc_v1_25451188/models/model_final_29.pth",
+  "run_dir": "/data/dust/user/guvenlia/mds-ml/flex_atten/runs/CA_SH_cm_csc_v1_25451188",
+  "opset": 17,
+  "slot_z": 2.0,
+  "min_slots": 2,
+  "num_queries": 512,
+  "xy_units": "normalised trapezoid (u_n, v_n) per layer; invert with norm.trapezoid + the layer frame",
+  "t_norm": "z-score (simhits_time)",
+  "e_norm": "z-score of log10(E + log_eps) (simhits_energy)",
+  "n_keep_rule": "PRODUCER-SIDE: rank by exist_logit within a doc, keep round(count_mu). round(mu+2*sd) is the BUDGET and ~3x larger; both reachable without re-export.",
+  "budget_rule": "n_slots = ceil(mu + 2.0*sd), clamped to [2, 512]",
+  "graph_io": {
+    "enc_out": [
+      "wires_out",
+      "doc_cond",
+      "count_mu",
+      "n_slots",
+      "strips_emb"
+    ],
+    "dec_in": [
+      "wires_out",
+      "doc_cond",
+      "det_idx_wires",
+      "doc_of_slot",
+      "within",
+      "hit_det_idx",
+      "strips_emb",
+      "det_idx_strips"
+    ],
+    "dec_out": [
+      "hits",
+      "exist_logit",
+      "hit_sigma"
+    ]
+  },
+  "hit_sigma": "per-slot (sigma local x, sigma local y) from the sigma head, uncalibrated; NORMALISED (u_n, v_n) units",
+  "settings": {
+    "target_mode": "full",
+    "data_size": "classicalmix_csc",
+    "enc_mask_mode": "adjacent",
+    "dec_mask_mode": "chamber",
+    "embed_dim": 128,
+    "depth": 3,
+    "num_heads": 8,
+    "num_queries": 512,
+    "learning_rate": 0.0001,
+    "learning_rate_delta": 1e-05,
+    "batch_size": 4,
+    "num_epochs": 30,
+    "n_workers": 3,
+    "use_fp16": false,
+    "lambda_exist": 0.0005,
+    "lambda_geo": 0.1,
+    "lambda_time": 0.00182,
+    "lambda_energy": 0.00155,
+    "doc_reweight_pow": 0.3,
+    "use_count_head": true,
+    "lambda_count": 0.00013,
+    "aniso_w_strip": 1.0,
+    "aniso_w_wire": 1.0,
+    "bin_embed_c": 16,
+    "bin_n_conv": 1,
+    "tokens_per_gb": 2000,
+    "budget_key": "sum",
+    "use_dynamic_batching": true,
+    "slot_buckets": [
+      4,
+      16,
+      64,
+      256,
+      512
+    ],
+    "slot_z": 2.0,
+    "stats_sample_frac": 0.1,
+    "prefetch_factor": 2,
+    "persistent_workers": false,
+    "verbose_every": 0,
+    "profile_time": false,
+    "checkpoint_every": 5,
+    "data_backend": "classicalmix",
+    "packed_use_shm": true,
+    "bucket_warmup_truth_epochs": 10,
+    "bucket_warmup_blend_epochs": 5,
+    "max_tokens": 30000,
+    "exist_geo_feats": false,
+    "clusterize_after_test": true,
+    "clusterize_max_events": 15000,
+    "early_stop_patience": 100000,
+    "early_stop_min_delta": 1e-07,
+    "reserved_gb": 4.0,
+    "match_mode": "sinkhorn",
+    "sinkhorn_eps": 0.1,
+    "sinkhorn_iters": 150,
+    "sinkhorn_dustbin_mult": 3.0,
+    "best_track_start_epoch": 0,
+    "depth_dec": 2,
+    "dec_self_attn": true,
+    "trap_xy": false,
+    "trap_inputs": false,
+    "exist_list_tau": 1.0,
+    "match_w_time": 0.02,
+    "match_w_energy": 0.02,
+    "fold_me11": false,
+    "dec_strip_attn": true,
+    "dec_self_last": true,
+    "use_sigma_head": true,
+    "geo_nll_beta": 0.5,
+    "doc_ctx": true,
+    "doc_ctx_dphi": 0.3,
+    "doc_ctx_depth": 2,
+    "_comment": "cm_csc_v1: v25abc_t model/loss on the classical-mix CSC packed data (unpacked digis, exact strip/wire geometry, per-layer local u,v, ME1/1 unfolded, layer-centre inputs, BX window -8..+3). Model and loss settings unchanged from v25abc_t.",
+    "sigma_nll": "student_t",
+    "sigma_nu": 3.0,
+    "classicalmix_dir": "/data/dust/user/guvenlia/mds_data_classicalmix/packed/csc",
+    "classicalmix_stats": "stats/classicalmix_csc.json",
+    "bx_window": [
+      -8,
+      3
+    ],
+    "lambda_shape": 0.1,
+    "alpha_t_match": 0.2,
+    "alpha_e_match": 0.1,
+    "lambda_dir": 0.0,
+    "focal_alpha": 0.75,
+    "focal_gamma": 2.0,
+    "aniso_delay_epochs": 0,
+    "aniso_ramp_epochs": 0,
+    "exist_target": "matched",
+    "exist_sigma_rel": 1.0,
+    "lambda_exist_list": 0.0,
+    "save_gif": false
+  },
+  "norm": {
+    "layout": "csc_classicalmix_v1",
+    "bx_window": [
+      -8,
+      3
+    ],
+    "trapezoid": {
+      "1,1": {
+        "v_lo": -76.00001525878906,
+        "v_hi": -31.499902725219727,
+        "hw_lo": 9.6425142288208,
+        "hw_hi": 13.709736824035645,
+        "n_strip_ends": 43023554
+      },
+      "1,2": {
+        "v_lo": -31.500015258789062,
+        "v_hi": 76.00003051757812,
+        "hw_lo": 14.01802921295166,
+        "hw_hi": 24.06428337097168,
+        "n_strip_ends": 29537676
+      },
+      "1,3": {
+        "v_lo": -88.20005798339844,
+        "v_hi": 86.29010772705078,
+        "hw_lo": 26.113967895507812,
+        "hw_hi": 42.30091857910156,
+        "n_strip_ends": 8294636
+      },
+      "1,4": {
+        "v_lo": -83.16004943847656,
+        "v_hi": 81.00013732910156,
+        "hw_lo": 35.045806884765625,
+        "hw_hi": 46.282569885253906,
+        "n_strip_ends": 2362846
+      },
+      "2,1": {
+        "v_lo": -95.80003356933594,
+        "v_hi": 93.86009216308594,
+        "hw_lo": 27.491592407226562,
+        "hw_hi": 62.9854850769043,
+        "n_strip_ends": 17499392
+      },
+      "2,2": {
+        "v_lo": -162.48004150390625,
+        "v_hi": 160.58009338378906,
+        "hw_lo": 33.76911926269531,
+        "hw_hi": 63.738494873046875,
+        "n_strip_ends": 7555920
+      },
+      "3,1": {
+        "v_lo": -85.81002807617188,
+        "v_hi": 83.89004516601562,
+        "hw_lo": 31.232614517211914,
+        "hw_hi": 62.99110412597656,
+        "n_strip_ends": 9809524
+      },
+      "3,2": {
+        "v_lo": -162.48004150390625,
+        "v_hi": 160.580078125,
+        "hw_lo": 33.76912307739258,
+        "hw_hi": 63.73849105834961,
+        "n_strip_ends": 6260060
+      },
+      "4,1": {
+        "v_lo": -75.6600341796875,
+        "v_hi": 73.76007080078125,
+        "hw_lo": 34.99422073364258,
+        "hw_hi": 62.95741653442383,
+        "n_strip_ends": 7235498
+      },
+      "4,2": {
+        "v_lo": -162.4800262451172,
+        "v_hi": 160.58009338378906,
+        "hw_lo": 33.769126892089844,
+        "hw_hi": 63.738487243652344,
+        "n_strip_ends": 5821806
+      }
+    },
+    "minmax": {
+      "strip_number": {
+        "min": 1.0,
+        "max": 80.0
+      },
+      "wire_group": {
+        "min": 1.0,
+        "max": 112.0
+      },
+      "wire_width": {
+        "min": 0.6238900423049927,
+        "max": 10.75
+      },
+      "adc": {
+        "min": 1.0,
+        "max": 4095.0
+      }
+    },
+    "layer_centre": {
+      "min": [
+        -595.418091,
+        -595.251343,
+        -1044.03821
+      ],
+      "max": [
+        595.1604,
+        595.154297,
+        1043.88281
+      ]
+    },
+    "simhits_time": {
+      "method": "std",
+      "mean": [
+        -11.495948963212214
+      ],
+      "std": [
+        40.74854766923672
+      ],
+      "min": [
+        -203.22804260253906
+      ],
+      "max": [
+        552.8549194335938
+      ]
+    },
+    "simhits_energy": {
+      "method": "std",
+      "mean": [
+        -5.411976962630772
+      ],
+      "std": [
+        0.2785501158264739
+      ],
+      "min": [
+        -5.698969738911781
+      ],
+      "max": [
+        -1.4210913326722323
+      ],
+      "log_eps": 1e-12
+    },
+    "stats_path": "/data/dust/user/guvenlia/mds-ml/flex_atten/stats/classicalmix_csc.json"
+  },
+  "encoder_mb": 4.43,
+  "decoder_mb": 5.27
+}
